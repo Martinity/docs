@@ -53,8 +53,8 @@ const headings = [
   c.masks.length > 0 && { depth: 2, slug: 'bit-masks', text: 'Bit masks' },
 ].filter(Boolean) as { depth: number; slug: string; text: string }[];
 
-// The ENG and JPN maps are derived and only confirm 85 of the 138 handlers, so
-// a missing address means "not confirmed in that build", not "absent".
+// The ENG and JPN maps are derived, so a missing address means "not placed in
+// that build's map", not "absent".
 const addrRows = [
   { label: 'Debug', detail: 'SLUS-21262 prototype', addr: c.debug ?? '' },
   { label: 'ENG', detail: 'USA release', addr: c.eng ?? '' },
@@ -130,10 +130,10 @@ const unconfirmedBuilds = [!c.eng && 'ENG', !c.jpn && 'JPN'].filter(Boolean);
           {
             unconfirmedBuilds.length > 0 && (
               <div class="facts__caveat">
-                Not confirmed in the {unconfirmedBuilds.join(' or ')} map
-                {unconfirmedBuilds.length > 1 ? 's' : ''}. Those maps are derived and omit any
-                function whose body does not match the reference build, so the handler exists —
-                its address simply has not been pinned down there.
+                Not placed in the {unconfirmedBuilds.join(' or ')} map
+                {unconfirmedBuilds.length > 1 ? 's' : ''}. Those maps are derived, and neither a
+                byte match nor a porting rule has pinned this handler down there — it is still
+                installed in that build's dispatch table.
               </div>
             )
           }

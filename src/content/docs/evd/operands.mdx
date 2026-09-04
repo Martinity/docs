@@ -67,13 +67,14 @@ not be looked up in a character table. Two functions do the resolving:
 `0x3A1160` covering `0x26AC`–`0x26B7`) and
 `CRadiScript::GetAbstractionCharacterNumber` at `0x002E5470` (a 22-entry table
 at `0x3A38B0` covering `0x26DE`–`0x26F3`, delegating anything lower to the
-first).
+first) <Tag kind="confirmed" />.
 
 | Codes | Resolves to |
 |---|---|
-| `0x26AC` | The current / controlling character (global halfword at `+0x830`) |
-| `0x26AD`–`0x26B1` | Party slots 1–5 (halfwords at `+0x834 + 4N`) |
-| `0x26B2`–`0x26B7` | Scans over the party slots. Rarely used; meanings not established. |
+| `0x26AC` | The current / controlling character — the hero — from the config block's halfword at `+0x830` (`0x002C0BF8`–`0x002C0C08`) |
+| `0x26AD`–`0x26B1` | Party slots 1–5, halfwords at `+0x834 + 4N` (`0x002C0C10`–`0x002C0C54`) |
+| `0x26B2` | The **current talk speaker**: entry `[gpTalk+0x1B9]` of the talk object's speaker table at `+0x190`, or `0` when no speaker is active (`0x002C0C58`–`0x002C0CF8`) |
+| `0x26B3`–`0x26B7` | Scans over the party slots. Rarely used; meanings not established. |
 | `0x26DE`–`0x26E0` | An equipment-based lookup via `CCharaEquipmentManager::GetEquipedCharacterCls` |
 | `0x26E1`–`0x26EA` | **The character held in event value 1000+N** |
 | `0x26EB`–`0x26F1` | Jump to `SetError`; reserved / unimplemented |
@@ -107,25 +108,66 @@ entire game, behind only "current character": scripts stash a character in value
 
 ## 3. Values and flags
 
-Three distinct stores of state are addressable from a script.
+Three distinct stores of state are addressable from a script. The first two
+live in one place: a `0x870`-byte **config block** that `CRadiApp::Startup`
+allocates (`0x002D1C70`–`0x002D1CB0`) and whose pointer sits at `0x003B2664`
+(`CRadiApp+0x164`). That block is what a save file holds — see
+[Events §3](../../events/gates/) for what is restored on load.
 
 ### 3.1 Config / event flags
 
-A large array of boolean flags read and written through
-`CRadiApp::GetConfigEventFlag` and `SetConfigEventFlag`. Ids run to at least
-8191. Commands can operate on a **run of consecutive flags**, treating them as
-the bits of a small integer, LSB first — so a single operand can carry a small
-number spread across several flag ids.
+**8,192 boolean flags**, a bit array at `+0x10`–`+0x40F` of the config block,
+read and written through `CRadiApp::GetConfigEventFlag` (`0x0028C860`) and
+`SetConfigEventFlag` (`0x0028C8A0`): word `(flag >> 5) * 4`, bit `flag & 0x1F`,
+bounded at `flag < 0x2000` <Tag kind="confirmed" />. Commands can operate on a
+**run of consecutive flags**, treating them as the bits of a small integer, LSB
+first — so a single operand can carry a small number spread across several flag
+ids, and a condition can test one.
 
 ### 3.2 Event values
 
-32-bit script variables. Ids `1000`–`1009` are **script-local**, stored in the
-running script's own `SCR_DATA` block at `+0x34 + 4N`
-(`SetEventValueForScript`, `0x002E4E40`); everything else indexes a global
-array.
+32-bit script variables. The id space is not one flat array
+<Tag kind="confirmed" />:
 
-This is why 1000–1009 appear constantly — they are scratch registers, and a
-sibling script does not see them.
+| Id | Storage | Evidence |
+|---|---|---|
+| `0` | Global value 0, **reloaded from `Random()` on every read**. | `GetEventValueForScript` `0x002E4EC4`–`0x002E4EE8` |
+| `1`–`255` | **Global**, `config_block + 0x410 + id * 4`. | `0x002E4EA8`–`0x002E4EC0`; writes `SetEventValueForScript` `0x002E4E18`–`0x002E4E38` |
+| `256`–`999` | Nothing. Reads return `0`; writes are ignored. | the `sltiu 0x100` guards above |
+| `1000`–`1009` | **Script-local**, `SCR_DATA + 0x34 + (id − 1000) * 4`. | `0x002E4F14`–`0x002E4F90`; writes `0x002E4E40`–`0x002E4E78` |
+| `1100`, `1101`, `1102` | **Read-only slot status**: status byte 1 bits 0–1 (the waiting state), bit 2 (the last trigger check), bit 3 (a duplicate start was refused). | `0x002E4EF4`–`0x002E4FC0` |
+| anything else | Reads return `0`; writes are ignored. | |
+
+This is why 1000–1009 appear constantly — they are scratch registers — and why
+a sibling script does not see them: they live in the running slot, not the
+config block. Two mechanisms make them *look* shared:
+
+- A stacked start (`Command_01`) ends the current slot with `Command_00` and
+  starts the callee **in the same slot** (`0x002EBF20`–`0x002EBF48`), so the
+  callee inherits the caller's ten locals. The prologue chain `500/13 → 14 →
+  15 → 16 → 17` passes its state this way.
+- A plain start (`Command_04`) reads control bits from the high halfword of
+  its first operand word (`srl $s2, $v0, 0x10` at `0x002EB658`). Bit 2 of
+  that halfword copies the caller's `0x28`-byte local block into the new
+  slot's `+0x34` (`andi $v0, $s2, 4` at `0x002EB6D0`, the `memcpy` at
+  `0x002EB6F0`); bit 3 copies the float and angle vectors at `+0x60`. The
+  decompiler's `inherit_values=1`.
+
+:::note[Correction]
+Earlier versions said that ids other than 1000–1009 "index a global array".
+Only ids 0–255 do. Ids 256–999 and 1010 and above are dead, and 1100–1102 are
+slot status bits. Read out of `GetEventValueForScript` and
+`SetEventValueForScript` at the addresses above.
+:::
+
+One global value is written by a command rather than a script. `Command_19`,
+the inventory command, **always** ends by storing its result in global event
+value 17 (`sw $s2, 0x454($v1)` at `0x002E97B4`; `0x454 = 0x410 + 17 * 4`): the
+number of items actually added or removed, `0` for a query that found the item
+or a delete-all, `−2` for a query that did not, `−1` when the character has no
+personal record. A script that tests value 17 immediately after
+`change_inventory` is checking that the item really went in, not reading a
+story value.
 
 ### 3.3 Character properties
 
@@ -142,13 +184,18 @@ They cover HP, EXP, money, status and so on. Character entries 4, 5 and 73 all
 point at the same stub (`0x002A0FD0`), so those property codes are unused —
 which is a useful validity check on any decoded operand.
 
+Every character accessor starts from the person record
+`[[gpCharaManager+0x54]+0x20] + id * 0x370`, and most of the ones scripts read
+go on to `+0x0C` of it, the `CPersonalData` sub-record. Offsets quoted for
+these properties are into that sub-record.
+
 ### 3.4 Property `0x1D`: storage the game never reads
 
 One property is worth calling out because it is not engine state at all.
 
 Property `0x1D` dispatches to `CCharacterManager::CharaParaCode_029`
 (`0x0029EED0`), which reads and writes one byte at `+0x82` of the character's
-person record (the sub-object at character `+0x0C`).
+`CPersonalData`.
 
 Scanning every byte, halfword and word access across `Main.elf`, `step0_00`,
 `step1_02` and `step2_00` finds **no other reader of that byte**. The only other
@@ -167,12 +214,13 @@ The corpus shows scripts using it as per-character flags, and using it heavily:
 
 That is the whole lifecycle, written and read entirely by event scripts. It is
 general-purpose per-character storage rather than a piece of engine state with a
-hidden meaning. Neighbouring bytes `+0x7C` and `+0x80` have their own property
-codes and the same shape, but no script in the corpus uses them.
+hidden meaning. The neighbouring bytes `+0x7C`–`+0x7E`, `+0x81` and `+0x83`
+have their own property codes and the same shape; the NPC scripts test them as
+conditions, and what each one means is not established.
 
 ## 4. Symbol coverage
 
-Id-to-name tables cover **2,423 id-to-name entries** across seven domains. Ids
+Id-to-name tables cover **2,519 id-to-name entries** across seven domains. Ids
 remain authoritative — a name is a convenience, not part of the format.
 
 | Domain | Entries |
@@ -183,8 +231,8 @@ remain authoritative — a name is a convenience, not part of the format.
 | BGM | 133 |
 | skill | 39 |
 | event | 137 |
-| flag | 175 |
-| **Total** | **2,423** |
+| flag | 271 |
+| **Total** | **2,519** |
 
 That figure counts entries, not globally unique display strings.
 
@@ -192,6 +240,7 @@ Spot checks against ids taken from the corpus: character `0x0001` Jack, `0x0042`
 Miranda, `0x00D3` Monki; BGM `0x0037` Gratifying Guest; location `0x001F`
 Dawnbay Diner and `0x00A0` Radiata Castle Exterior.
 
-Coverage is uneven. Flags are sparse by nature — **175 of 8,191** carry a
-description — and the event table is incomplete. Item coverage is good at 671
-entries, including per-category ids such as `0x0153`.
+Coverage is uneven. Flags are sparse by nature — **271 of 8,192** carry a
+description — and the event table names every one of the 107 shipped event
+files but not their individual scripts. Item coverage is good at 671 entries,
+including per-category ids such as `0x0153`.

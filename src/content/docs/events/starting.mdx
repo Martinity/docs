@@ -1,0 +1,358 @@
+---
+title: How an event starts
+description: >-
+  The one entry point for starting a script, and the six paths by which the
+  engine reaches a cutscene: from another event, from a map's own scripts, from
+  an NPC's act script, from the end of a battle, and from the schedule.
+sidebar:
+  label: How an event starts
+  order: 2
+---
+
+import Tag from '../../../components/Tag.astro';
+
+Every script the engine runs — cutscene, map script, NPC act script, schedule
+list, battle plug-in — goes through one function, and the question "what starts
+event `402/1`" has an exact answer in terms of who calls it and with what. This
+page gives that answer for the shipped data: the counts come from a static walk
+of every event, map and NPC script read from the USA disc
+([§1 of the chains page](../chains/#1-what-was-read) says what was read), and
+every engine claim cites the code.
+
+## 1. The entry point
+
+`CRadiScript::SetScriptNumber(slot, mode, script, character, variant, float)`
+(`0x002E3DD0`; ENG `0x002C6390`) is the only way a script begins. Its `mode`
+names the container the script number indexes
+([EVD format §4.2](../../evd/format/#42-script-sources-and-the-two-id-spaces)),
+and for events the modes that matter are:
+
+| Mode | Container | Who passes it |
+|---:|---|---|
+| `1` | The **current event file** — whichever file `LoadScriptFile` last loaded ([Disk file 186](../container/)) | `Command_04` / `Command_01` in a script; `CGame::Step1` after a battle; `CGame::Step4` after a time transition |
+| `3` | The **current map's** script table | `CBackGround::SettingMap`; `Command_04` in a script; the exit table and event polygons of the map itself |
+| `2`, `4` | A character's act scripts | `Command_04` in a schedule list or event; `CCharacterPerson::ActRun` |
+| `0xC`, `0xD` | A character's kick and talk reactions | `CCharacterPerson::RunReaction` and the field controller |
+| `0xB` | The schedule-selection file | `CGame::MakeAllCharaSchedule` |
+
+A scan of every image and overlay in the debug build finds **43 call sites**.
+The ones that matter on the field are in the table below; the rest are the
+title screen, battle plug-ins and the debug tools. What "script number" each
+passes is the whole story of this page <Tag kind="confirmed" />:
+
+| Caller | Mode | Script | Character | Note |
+|---|---:|---|---|---|
+| `CRadiScript::Command_04` `0x002EB668` | argument nibble | operand word `& 0xFFFF` — a literal | operand or default | the ordinary `start_script` |
+| `CRadiScript::Command_01` `0x002EBF44` | argument nibble | operand word `& 0xFFFF` | operand or default | `start_script_stacked`: ends its own slot first and starts the callee there |
+| `CRadiScript::FuncRun` `0x002E2FB0` | slot's mode | slot `+0x04` | slot `+0x10` | re-issues a deferred mode-1 start once its file has loaded |
+| `CBackGround::SettingMap` `0x0028A47C` | `3` | `0` | — | the map init script, skipped when a battle event is queued |
+| `CGame::ChangeMap` `0x003BBEA0` | `3` | RBAD exit record `+0x27` | the character | an exit polygon that runs a script instead of changing map |
+| `CChrCollisionManager::CheckLandEvent` `0x002B9B98` | `3` | each non-zero byte of the polygon's event payload | the character standing on it | |
+| `CGame::CheckKickEvent` `0x003BB2E0` | `3` | each non-zero byte of the kicked polygon's payload | the hero | |
+| `CGame::Step1` `0x003B8EF8` | `1` | `config+0x84E` | `0` | the post-battle event |
+| `CGame::Step4` `0x003B75C4` | `1` | `1` | `0` | script 1 of the current file, after a time transition |
+| `CCharacterPerson::RunReaction` `0x003BE9E4` | `0xC` / `0xD` | `0` | the person | kick / talk |
+| `CGame::CheckAround` `0x003BC65C`, `CheckKickChara` `0x003BB8C0` | `0xD` / `0xC` | `0` | a non-person character | the same for objects |
+| `CCharacterPerson::ActRun` `0x003C00BC` | person `+0x330 >> 4` | person `+0x336` | the person | **the only caller that passes a non-zero float**: the schedule percentage |
+| `CGame::MakeAllCharaSchedule` `0x003B714C`, `0x003B7170`; `RunScdListScr` `0x003B6DB0` | `0xB` | `1000`, `0`, then each person's selection script | — | list selection |
+
+Two things follow. **No script number is ever computed from an event value
+or a flag at a call site**: the engine's own numbers are constants or fields it
+stored earlier, and the two commands read a literal operand. And the scripts
+agree: every `start_script` in all four corpora — 913 in the event, map and
+NPC scripts, and every one in the character archives — carries a literal
+script id, and every `load_script_file` a literal file id. There is no
+computed launch anywhere.
+
+## 2. The six paths to a cutscene
+
+With the battle queue and the NPC scripts there are six ways a field event
+begins. Counts are over the shipping game's own paths; the debug room and its
+chapter-select file are excluded ([chains §1](../chains/#1-what-was-read)).
+
+| Path | The idiom in the decompiled scripts | Count |
+|---|---|---:|
+| **event → event, same file** | `start_script(mode=1, script_id=S)` | 275 |
+| **event → event, another file** | `load_script_file(file=F)` then `start_script(mode=1, script_id=S)`, or the stacked form | 35 |
+| **map → event** | the same load-and-start idiom inside a map script | 696 launches, reaching 336 events from 214 maps |
+| **NPC → event** | the same idiom inside a person's act script, after its flag tests | 115 launches, reaching 76 events, from 84 scripts |
+| **battle → event** | `configure_battle(battle_event_file=F, battle_event_script=S)` | 218 sites (171 in events, 47 in map scripts); 170 name an event; 90 distinct events |
+| **event → act script → event** | `start_script(mode=2, character=P, script_id=N)` into a person whose act script launches an event | 5 sites in events; only the two into person 265 lead to a launch (§6) |
+
+The 754 `start_script(mode=3, …)` calls inside events are **not** event
+chaining: mode 3 is the map's table, so those start map-local scripts — doors,
+fades, NPC business — on whatever map is current.
+
+## 3. Event to event
+
+A successor is named with a literal script number in the current file, or with
+a file load followed by the number. The two commands differ in what happens to
+the caller:
+
+- **`Command_04`** (`start_script`) allocates a fresh slot; the caller keeps
+  running. Control bits in the operand copy the caller's default character,
+  its ten local event values (`memcpy` of `0x28` bytes into the new slot's
+  `+0x34` at `0x002EB6D0`–`0x002EB6F4`) and its float and angle vectors into
+  the callee, which is how state crosses the boundary.
+- **`Command_01`** (`start_script_stacked`) copies its own `0xE0`-byte slot to
+  the stack, ends it with `Command_00`, and calls `SetScriptNumber` with **its
+  own slot index** (`0x002EBF00`–`0x002EBF48`): the callee runs in the same
+  slot and inherits every local. The prologue chain `500/13 → 14 → 15 → 16 →
+  17` is written this way, each script naming the next, which is why obi and
+  music set by script 13 are still up in script 15
+  ([chains §5](../chains/#5-worked-chains)).
+
+Mode-1 starts carry a **deferred** form. If the event file named by the last
+`load_script_file` has not finished loading, `SetScriptNumber` parks the
+request: the slot gets status bit 6, the script number, character and the
+float (`0x002E3F00`–`0x002E3F94`), and `FuncRun` re-issues it on the frame the
+file's load status reports ready (`0x002E2F50`–`0x002E2FB4`). A script that
+loads a file and starts a script in the next command therefore works, and
+never has to wait explicitly.
+
+## 4. Map to event
+
+### 4.1 The init script and its two conventions
+
+`CBackGround::SettingMap` starts **nested member 0** of the map's script table
+with `SetScriptNumber(-1, 3, 0, 0, 0, 0.0f)` at `0x0028A47C` — **unless a
+battle event is queued**, in which case it returns before the call
+<Tag kind="confirmed" />:
+
+```asm
+0028A434  lw    v0, 0x2664(at)      ; config block
+0028A438  lhu   v0, 0x84c(v0)       ; the queued battle event file
+0028A43C  beqz  v0, run_init
+0028A440  addiu v0, zero, -2
+0028A444  b     return              ; queued: no init script
+...
+0028A470  addiu a2, zero, 3         ; mode 3
+0028A474  move  a3, zero            ; script 0
+0028A47C  jal   SetScriptNumber
+```
+
+Two conventions run through the 881 init scripts of the 882 maps:
+
+- **881 of 882** open with `if_flag(flag=220, not=1) { … }`. Flag 220 is the
+  engine's **in-battle** flag (config flag `0xDC`): no script anywhere writes
+  it, its only writer is `CBattleMain::TaskEnd`, and its 43 readers are all
+  battle contexts. The block is the normal field entry; the `else` is the
+  return from a fight.
+- **800 of 881** end the same way: `start_script(mode=3, script_id=99)` and
+  then a **bare** `start_script(mode=1, script_id=1)` with no
+  `load_script_file` before it — script 1 of *whatever event file is currently
+  loaded*. The engine sets no event file per map. `LoadScriptFile` has 11
+  callers in the whole image and its overlays, and on the field they are
+  `Command_06`, `CGame::Step1`'s post-battle path and `CGame::Step4`'s
+  schedule step, so "the current file" is game state left by the last load,
+  like a flag. Every one of the 107 event files has a script 1, and 96 of them
+  load a map of their own, so that bare start is the field's re-entry into the
+  current file's opening, under the init script's own flag tests around it.
+
+### 4.2 Where the launches live
+
+Of the 696 map-side launches:
+
+| Map script | Launches | What it is |
+|---|---:|---|
+| `0` (init) | 118 | The **story triggers**: the init script arms things by flag and launches events. |
+| `100`–`199` | 561 | **Contact scripts**. Each polls a collision attribute or "action pressed here" — `end_if(condition=0x83 …)`, the controller-button test ([control flow §2.3](../../evd/control-flow/#23-condition-bases)); `trigger(action=2, …)`; a script-lookup condition that nothing else is running — and launches a generic event: `810/10` from 103 contact scripts on 48 maps, `800/5` from 22 on 21 maps, `810/7` from 19 on 10 maps. No script starts them; the field arms them itself. |
+| `1`–`99`, `200`–`299` | 17 | Map-local scripts the **engine** starts from map data, not from a script (§4.3). |
+
+Only 119 of the map launches sit in a script reachable from the init script
+through `start_script(mode=3)` chains; the other 577 are contact scripts and
+engine-armed scripts. Two facts settle that the contact scripts are armed
+rather than dead: no script anywhere names them, and the constants the engine
+passes for mode-3 scripts lie only in the 256–263 band —
+`CCharaEventLeaveManager` 257–263, `CCharaPutManager::ShuffleLiveFlags` 258,
+`CCharaStairsCheckManager` 256, `CBtlAcquisition::AddDroppedItem` 257 and 259
+— so 256–263 are engine system scripts, and **how 100–199 are armed is not
+established** (a path that is not a `SetScriptNumber` constant).
+
+### 4.3 Map data that starts a script
+
+Two pieces of the map itself carry script numbers, and both are read by
+`step1_01` code <Tag kind="confirmed" />:
+
+**The RBAD exit table** (map archive slot 1). `CGame::ChangeMap`
+(`0x003BBB20`) matches byte 2 of the polygon the character stands on against
+the records' exit ids; records are `0x28` bytes, and a record whose byte
+`+0x27` is non-zero starts that map script instead of changing map
+(`lbu a3, 0x27(s5)` at `0x003BBCF8`, the call at `0x003BBEA0`). Each record
+also carries four condition ids and payloads of its own (`+0x00`–`+0x23`),
+checked through the same `CheckCondition`, and records with the same exit id
+are tried in order until all four pass. This is where the odd scripts 1–23 of
+maps 130, 131 and 210 come from — walk-on exits that run a script — and the
+`1xx` scripts of maps 20, 314 and 508.
+
+**The RLF event polygons** (map archive slot 5). `CBackGround::GetHeight`
+merges each event polygon's payload into `gpBackGround+0x1434`, and the
+collision manager copies it into the character's collision record at `+0x14`
+every field frame. `CChrCollisionManager::CheckLandEvent` (`0x002B9B00`) then
+starts a mode-3 script for **each non-zero byte** of that word, for a character
+whose collision attribute has bit 3 (`0x002B9B78`–`0x002B9BAC`):
+
+```asm
+002B9B5C  lw    v1, 4(v1)
+002B9B60  andi  v1, v1, 8            ; collision attribute bit 3
+002B9B64  beqz  v1, done
+002B9B78  andi  a3, s0, 0xff         ; byte i of the merged event payload
+002B9B7C  beqz  a3, next
+002B9B90  addiu a2, zero, 3          ; mode 3, script = the byte
+002B9B98  jal   SetScriptNumber
+002B9BA4  slti  v1, s1, 3            ; three bytes
+002B9BAC  srl   s0, s0, 8
+```
+
+`CGame::CheckKickEvent` (`0x003BB120`) does the same for a polygon in front of
+the hero when the kick button is pressed, skipping bytes equal to the polygon
+the hero stands on. This is where scripts 202–216 come from, and map 20's
+217 and 218 — the door `EVA_DOORA01` is `RLF_Event05`, payload `0x0D0000DA`.
+
+The events those local scripts launch — `800/3`, `809/77`, `810/7`, `810/11` —
+therefore need the player standing on, or kicking, that polygon.
+
+## 5. Battle to event
+
+`Command_16` (`configure_battle`) stores the event file and script at
+`config+0x84C` and `+0x84E` (`sh a2, 0x84c` at `0x002E9DF8`, `sh a3, 0x84e` at
+`0x002E9E10`) <Tag kind="confirmed" />. When the fight ends the field task's
+`CGame::Step1` reads them back:
+
+```asm
+003B8E10  lhu   a1, 0x84c(v1)        ; queued event file
+003B8E14  beqz  a1, no_event
+003B8E20  jal   LoadScriptFile       ; load it
+...
+003B8EB4  lhu   s1, 0x84e(v1)        ; the script number
+003B8EBC  sh    zero, 0x84c(v0)      ; clear both
+003B8EC8  sh    zero, 0x84e(v0)
+003B8EF0  addiu a2, zero, 1          ; mode 1
+003B8EF8  jal   SetScriptNumber      ; script = s1
+```
+
+The map that comes back is the one the player was on when the fight began —
+the configuring script's map — and because the queued file makes `SettingMap`
+skip the init script (§4.1), **a post-battle event runs on that map with none
+of the init script's arming or NPC placement having happened**. A
+`battle_map` of `0xFFFF` means the fight itself stays on the current map (43
+of the 170 sites); otherwise the fight loads its own arena and the pre-battle
+field map is restored afterwards.
+
+Of the 90 post-battle events, 87 load a map of their own at the top — 53 of
+them the map they were already on — so they start cold like any standalone
+script. Three inherit the pre-battle map
+([chains §4b](../chains/#4b-post-battle-events-that-inherit-the-pre-battle-map)).
+
+Event file 427 is the shape in full: `map 591 init → 427/1 (map 590) → fight →
+427/3 (loads 641) → fight → 427/4 → fight → 427/5 → 427/6 → fight → 427/7`,
+every "fight" a `configure_battle` naming the next script.
+
+## 6. NPC to event
+
+A person's **act scripts** are the EVDs in its kind-7 action data, one entry
+per schedule list number, with sub-slots `0` (mode-4 act script), `2` (mode-2
+act script), `4` (the mode-D **talk** script) and `5` (the mode-C **kick**
+script); sub-slot `1` is the script's `RMF1` messages
+([data layout](../container/#4-the-other-script-containers)). No other sub-slot
+exists in any shipped entity.
+
+**Talk and kick.** `CCharacterPerson::RunReaction(int mode)` (`0x003BE890`;
+ENG `0x00389D90`) starts `SetScriptNumber(-1, mode, 0, person, 0, 0.0f)` at
+`0x003BE9E4` with `mode` `0xD` (talk) or `0xC` (kick) <Tag kind="confirmed" />.
+`GetScriptAddress` for those modes returns the act data itself as the EVD, so
+the script number is always the constant `0`. It is called from
+`CGame::CheckAround` — the talk button, nearest person in range and facing,
+requiring that a talk script exists — and from `CGame::CheckKickChara`. The
+talk button is `0x2000` of the pad word, gated by config flag 891, the same
+flag condition base `03` masks
+([control flow §2.3](../../evd/control-flow/#23-condition-bases)).
+
+**Schedule act scripts.** Mode-2 scripts are started by the schedule:
+`Command_04` executed from the person's own schedule list (a slot with mode
+nibble `0xF`) records the step's script and mode on the person
+(`+0x336`, `+0x330` bits 4–7; `0x002EB7F0`–`0x002EB888`), and
+`CCharacterPerson::ActRun` launches it with the current schedule percentage as
+the float (`0x003C008C`–`0x003C00C0`), so the script resumes after the last
+mode-2 marker at or below the elapsed fraction of the step. They are also
+started directly by `start_script(mode=2, character=P, script_id=N)` from
+events and map scripts.
+
+**Where the launches are.** All 115 launches from character files sit in
+mode-2 and mode-D scripts — 89 and 24 from the 288 persons, 2 from two
+unlabelled entities (2215 starts `800/4`, the battle setup; 2090 starts
+`52/10`, whose file is not one of the 107 event files and is otherwise
+unknown). None is in a mode-4 or mode-C script, a schedule list (file 185) or
+a selection script (file 184). Each is a literal `load_script_file` and
+`start_script(mode=1)` under literal flag tests: person 170, list 3, tests
+flags 4552, 4554, 4551, 4628 and 4503 and then loads file 429 and starts script
+1 on one path and 4 on another — "talked to him already: `429/4`, else
+`429/1`". 109 of the 113 person launches carry a story gate
+([gates §5](../gates/#5-coverage)).
+
+**Two conditions, not one.** An NPC launch needs the person to be on the
+schedule list whose act script carries it, *and* that script's own gate to
+pass. Which list a person is on is decided by the file-184 selection scripts,
+re-run at every field entry and time transition by `CGame::MakeAllCharaSchedule`
+(`0x003B6F40`): each tests story flags and issues one `set_person_schedule`.
+Event scripts do the same, mostly `list 0` (the person leaves the world). The
+event reference carries both gates per launch.
+
+### 6.1 The Event Watcher
+
+Person 265 has no model. Its act scripts are the **chapter triggers**: each
+mode-2 script of its lists waits for one chapter flag and starts the chapter
+event.
+
+| List | Launching scripts | Selected by | Example |
+|---:|---:|---|---|
+| 1 | 34 | **no script sets list 1** — the initial list from new-game or save data | `m2 004: flag 252 set & flags 539..541 >= 3 & flags 844..845 not 1 → 502/1` |
+| 2 | 35 | `sel0265` under `flags 773..775 is 0`, plus 43 event scripts that reset it to 2 unconditionally | `m2 010: flag 4449 set & flags 539..541 >= 3 & flags 844..845 is 2 → 502/1` |
+| 3 | 11 | `sel0265` under `flags 773..775 is 1` — the human path | `650/8`, `653/1`, `654/1`, `657/1`, `658/1` |
+| 4 | 7 | `sel0265` under `flags 773..775 is 2` — the non-human path | `754/1`, `757/1`, `758/5`–`6`, `759/1` |
+
+`flags 773..775`, read as a 3-bit number, is the story path ("Human Path
+Flag": `0` before the choice, `1` and `2` after), and it gates most lists.
+
+Act script 1 of every list is a dispatcher that does nothing but
+`start_script(mode=2, script_id=k)` for every watcher script of that list.
+Two event scripts start that dispatcher explicitly with
+`start_script(mode=2, character=265, script_id=1)`: **`800/5`**, the
+rest-and-heal event (the inn menu), at line 351, and `705/11` at line 197. So
+the chapter watchers are re-armed each time the player rests, on top of the
+schedule's own act-script starts. `flags 844..845` is the state around that:
+only `800/5` writes it, to `2`, immediately before starting the dispatcher;
+89 scripts — every chapter opening — clear it; nothing writes `1`. The list-2
+watchers require `is 2`, so on the console they fire only inside the rest
+flow. Each watcher also tests a three-flag counter with `>=` — `flags
+539..541 >= 3` for `502/1`, `542..544` for `503/1` — one counter per chapter,
+which the earlier condition decode read as an equality against an event value
+([control flow §2.1](../../evd/control-flow/#21-the-comparison-protocol)).
+
+A chapter event such as `502/1` is therefore "standalone" in the verdict
+column because it loads its own map, but the console reaches it only through
+person 265's list-2 script 10 under `flag 4449 set & flags 844..845 is 2`, or
+list-1 script 4 under `flag 252 set`.
+
+## 7. What is not established
+
+- **How contact scripts 100–199 are armed.** Inferred from their shape and
+  from the absence of any starter, not decoded.
+- **Which engine path starts the 49 unresolved roots**, and the 35 no-starter
+  scripts that do load a map. `SetScriptNumber` is called with a dynamic mode-1
+  number from `CPartySelectWindowManager::ReflectionSelectedMember`,
+  `CEventChrInOutCmt::Update`, `CBattleMain::State_VoltyBreakStart`,
+  `CBtlConversationRequest::StartShow` and the debug tools, so these are
+  engine-started from data — menus, party changes, battle results — or unused
+  ([chains §6](../chains/#6-the-49-unresolved-roots)).
+- **The Event Watcher's list 1** has no setter in any script; whether the
+  new-game data puts person 265 on list 1, and whether the first selection
+  moves it to list 2, is not traced.
+- **Lists 19 and 20** of 216 and 54 persons exist as act data but no schedule
+  block and no script names them; what requests them is unknown.
+- **Entities 2090 and 2215**, and event file 52.
+- **Start arguments** (`arg=0x81` on 413 map launches, `args=[0xE/0xF/0x10]`
+  down the 500 chain) are passed, but which command reads them in the callee
+  was not established.
+- Which polygon bytes fire by standing versus kicking depends on the polygon
+  geometry per map.

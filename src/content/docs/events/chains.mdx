@@ -1,0 +1,365 @@
+---
+title: Chains and verdicts
+description: >-
+  Which event scripts can be started on their own, which must be entered from
+  the one before them, which inherit their map from a battle or an NPC, and the
+  49 that nothing in the scripts starts at all.
+sidebar:
+  label: Chains and verdicts
+  order: 4
+---
+
+import Tag from '../../../components/Tag.astro';
+
+Written from a static read of every shipped script; nothing here is guessed from
+playback. The result is a **verdict per event script** — can it be started
+directly, and on which map — which the [event reference](../reference/) carries
+row by row.
+
+## 1. What was read
+
+Everything below is read from `Radiata Stories (USA).iso`, the way the engine
+reads it:
+
+- **Event scripts.** Every script of every event file, through the
+  datacenter's event tables, each file's outer Kods, each member unwrapped to
+  its inner member 0 ([Disk file 186](../container/)): **859 scripts in disk
+  file 186** and **34 in disk file 187**, 893 in all, no failures.
+- **Map script tables.** Every map's nested Kods: 882 maps, 8,709 scripts.
+  Member 0 is the map's init script.
+- **NPC scripts.** Disk file 184's 280 schedule-selection scripts and every
+  person's schedule lists (file 185) and act scripts — 9,705 person scripts.
+- **Every character file.** All 23,149 EVD payloads in the datacenter's kinds
+  0–8 for all 1,205 entity ids, enumerated from the raw containers and
+  cross-checked against an independent count of `EVD\x01` magics in the
+  decompressed bytes. The 13,159 not already in the person corpus were
+  decompiled and walked too ([§5g](#5g-every-character-file-walked)).
+- **A control-flow walk** of every launching script for the gates
+  ([Gates §4](../gates/#4-how-the-gates-were-read)), and of every
+  `set_person_schedule` for who puts a person on which list.
+- **The map data**: the RBAD exit tables and RLF event polygons of every map
+  ([How an event starts §4.3](../starting/#43-map-data-that-starts-a-script)).
+- **Two engine passes** over `SetScriptNumber` and its 43 call sites, the
+  inventory command, the save image, `CheckCondition` and its handlers,
+  `RunReaction`, `ChangeMap`, `CheckLandEvent` and `CheckKickEvent`.
+
+**The debug room is excluded.** Map 994's contact scripts 101–149 each launch
+one script of event file 802, and each of those starts one chapter opening;
+two more of its scripts launch four events directly. Left in, that file is the
+"predecessor" of 24 chapter openings and hides their real starters, so file
+802 and map 994 are dropped from every count. One more script goes with them:
+`800/6`, the room's mission-flag tool — 102 raw Shift-JIS `print_text` lines
+that set the mission flags directly, started by the room's script 197 on a
+button press and by nothing else. Together: 30 event scripts, 28 predecessor
+edges and 5 map launches. **829 field scripts** remain.
+
+## 2. The map an event runs on
+
+`load_background(slot=0, id=M)` puts map `M` on screen at once — slot 0 is the
+displayed slot. `load_background(slot>=1, id=M)` followed by `change_map` swaps
+it in. A load with no later `change_map` is a **preload for the successor**
+(105 scripts do this), and a `change_map` after the scene's dialogue has
+started is a **hand-off**: the map the *next* event will run on (337 scripts
+end that way). `750/1` is the shape that fooled a first version of this
+analysis: it loads 548 into slot 0 at line 10, plays the whole scene there,
+and only at line 1050 preloads 313 and changes to it.
+
+Which map a script *needs* is therefore its own slot-0 load, or — when it has
+none — whatever its predecessor, its battle, or the person who launched it
+left on screen. The reference's `map` column is that resolution; `own_map` is
+only the script's own load.
+
+## 3. The dependency classes
+
+Three classes count as "broken if started mid-chain", plus one found on the
+way:
+
+| Class | Detection | Scripts |
+|---|---|---:|
+| **No map of its own** | No slot-0 load and no early swap before the first `talk_rmf` or `set_character_position`. | 248 |
+| **Cast placed by a predecessor** | A character the script animates or moves (`play_character_animation`, `rotate_character`, a non-snap `set_character_position`) but never snaps itself. Excludes the abstraction 9900 (the default character) and **character 1, Jack**, whom the map's own entry places — `750/1` animates him without a snap and runs cleanly standalone. | 27 |
+| **Preload consumed** | A `change_map` with no `load_background` before it in the same script. | **0** — no shipped script does this; every swap loads its own slot first |
+| **Obi or music only in the debug block** | `set_window_mode`, `select_music`, `play_music`, `stop_or_pause_music` or `fade_screen` present **only** inside the top-level `if_value(event_value=1009, not=0) { … }` block — the debug build's diagnostic path, skipped when flag 8000 is clear — and nowhere on the normal path. | 141 |
+
+The last class is cosmetic — the window strip and the BGM, not the scene — so
+the verdicts keep it separate. `500/13` runs its `set_window_mode(arg=0x81)`
+and BGM unconditionally after the debug block closes; `500/15` has the
+identical three commands only *inside* that block, so a chained run inherits
+the obi and the music from 13 and a cold 15 has neither.
+
+Flags and event values a script reads are recorded but **do not feed the
+verdicts**.
+
+## 4. The verdicts
+
+Over the 829 field scripts:
+
+| Verdict | Scripts | Meaning |
+|---|---:|---|
+| **standalone** | 325 | Loads its own map, places its own cast, nothing starts it from an event. Start it directly. (+6 that only lack the debug-block obi/music.) |
+| **chained but self-contained** | 141 | An event starts it, but it loads its own map and places its own cast. Start it directly. |
+| **chained, only obi/music inherited** | 127 | As above, but the window strip or BGM would be missing on a cold start. Fine for the scene; enter via the predecessor for a scored comparison. |
+| **map-triggered** | 124 | Nothing in an event starts it; a map's init or local script launches it. Needs that map loaded and, where the launch is gated, those flags. |
+| **generic (contact)** | 34 | Launched by contact scripts on three or more maps; runs on whichever map it is used from. |
+| **post-battle, inherits** | 2 | Nothing starts it but a battle; no map of its own; runs on the pre-battle field map with the map init skipped. |
+| **NPC-launched, inherits** | 4 | Only a person's act script starts it and it loads no map: needs the map that person is standing on when talked to. |
+| **mid-chain** | 17 | Must be entered from a predecessor: no map of its own, or its cast is placed by the script before it. |
+| **unresolved root** | 49 | No map of its own and **no script anywhere names it** ([§6](#6-the-49-unresolved-roots)). |
+
+Disk file 187's 34 in-battle scripts are a separate group ([§7](#7-disk-file-187-the-in-battle-scripts)).
+
+Sanity, against scenes this project has run and scored in its own player:
+
+| Script | Verdict | Matches practice |
+|---|---|---|
+| `500/13` | chained but self-contained, own map 6 | ran standalone on map 6 for every board |
+| `500/15` | chained, only obi inherited, own map 6 | the harness needed `--enter-via 13` for exactly the obi |
+| `500/2` | chained, only obi inherited, own map 135 | ran standalone; position matched the savestate |
+| `660/3` | standalone, own map 393 | ran standalone on 393 |
+| `750/1` | chained but self-contained, own map 548 | ran standalone on 548 |
+| `801/3` | standalone, own map 20 | ran standalone |
+
+### 4a. The 17 that must be entered from a predecessor
+
+| Script | Its map | Start from | Why |
+|---|---|---|---|
+| `507/5` | 680 | `507/3` | animates 4001, never placed here |
+| `511/2` | 940 | `511/1` | animates 266 |
+| `511/3` | 590 | `511/2` | animates 266 |
+| `511/4` | 501 | `511/3` | animates 266 |
+| `516/2` | 754 | `516/6` | animates 3 (Ridley) |
+| `516/4` | inherits 754 | `516/2` | no map of its own |
+| `561/7` | 513 | `561/6` | animates 12, 266 |
+| `650/9` | 275 | `650/8` | animates 0, 1062, 262 |
+| `700/5` | inherits 246 | `700/4` | no map of its own |
+| `700/7` | inherits 187 | `700/6` | no map of its own |
+| `708/9` | inherits 393 | `708/4` | no map of its own |
+| `760/8` | inherits 438 | `760/4` | no map of its own |
+| `760/9` | inherits 438 | `760/4` | no map of its own |
+| `760/10` | 393 | `760/3` | animates 10 |
+| `760/11` | 393 | `760/10` | animates 162 (Aphelion) |
+| `800/5` | inherits 73 **or** 81 | ten different callers | no map of its own; the two predecessor groups leave different maps — the one ambiguous case |
+| `811/6` | inherits 111 | `811/3`, `811/4`, `811/5` | no map of its own |
+
+`516/2 → 750/1`: `750/1` itself is self-contained (it loads 548), but its
+caller `516/2` needs `516/6` first.
+
+### 4b. Post-battle events that inherit the pre-battle map
+
+| Script | Runs on | The battle is configured by | Note |
+|---|---|---|---|
+| `513/9` | 508 | `513/8` | story fight; `513/8` runs on 508 and hands the field back to it |
+| `660/4` | 438 | `660/3` | the fight at the end of `660/3`; `660/4` also has its own starters, so it is not map-dependent here |
+| `800/7` | whichever field map the fight began on | `800/3`, from 80 `configure_battle` sites | the generic encounter result handler; `800/3` is itself launched by map triggers on 4 maps and loads no map, so `800/7` inherits whatever `800/3` was on |
+
+To view one of these, load the pre-battle map and start the script directly;
+do not expect the map-init script's state, because the console skipped it too
+([How an event starts §5](../starting/#5-battle-to-event)). The 87 post-battle
+events that load their own map need nothing.
+
+### 4c. NPC-launched events without a map
+
+`420/1`, `501/5`, `506/1` and `701/1` load no map and are started only from a
+person's act script, so they need the map that person is standing on. The
+other 71 NPC-launched events load their own map. Which person and list starts
+each one, and the flag tests around the launch, are in the reference's
+`NPC launched by` and `NPC gates` rows: person 170, list 3, starts `429/1`
+under `flag 4552 set & flag 4503 clear` and `429/4` under `flag 4552 clear &
+flag 4554 set` — the "already talked to him" switch is flag 4552.
+
+## 5. Worked chains
+
+### 5a. `500/1` runs twice
+
+`500/1` is the new-game script, and it is entered **twice** in a normal
+playthrough, with one event value deciding what it does:
+
+```text
+new game ->  500/1  (value 1008 == 0)
+               |  plays movie 7, the opening FMV        <- if_value(1008, not=1) { ... }
+               |  start_script_stacked(13)              <- inside that same block
+               v
+             500/13 -> 500/14 -> 500/15 -> 500/16 -> 500/17    (the prologue chain)
+                                                        |  set_value(1008, 1)
+                                                        |  start_script_stacked(1)
+                                                        v
+             500/1  again  (value 1008 == 1)
+               |  the FMV block and the start of 500/13 are SKIPPED
+               |  the story-flag initialisation runs (1793-1799 locks, 938-1579 fields)
+               |  start_script_stacked(2)
+               v
+             500/2   (Coliseum, map 135)
+```
+
+- **The switch is event value 1008, not a flag.** `500/1` line 119:
+  `if_value(event_value=1008, not=1) { … }` — the block runs only while 1008 is
+  not 1. Inside it: `play_movie(movie=7)`, the obi and BGM, Jack's tunic and
+  model, and `start_script_stacked(mode=1, script_id=13)`. Everything after the
+  block — the flag initialisation and the final `start_script_stacked(2)` at
+  line 1265 — runs on both passes.
+- **`500/17` is the only shipped script that sets 1008 to 1 for this purpose.**
+  It plays out on map 160, preloads 384 into slot 1, fades out, sets `1008 = 1`
+  at line 187 and re-enters `500/1` with `start_script_stacked` at 188. `500/1`
+  then shows 384 as its own map and preloads 135 for `500/2`.
+- **1008 does not survive a save, and cannot**: values 1000–1009 are the
+  running slot's own words, and `500/17`'s write reaches `500/1` only because a
+  stacked start runs the callee in the same slot
+  ([How an event starts §3](../starting/#3-event-to-event)).
+- `500/1`'s own debug block (`if_value(1009, not=0)`) also sets `1008 = 1`, and
+  it is the *only* place in `500/1` that sets flag 1000 "New Game Started", the
+  clock (06:55) and event value 3 = 500. A cold start that takes that block
+  skips the FMV and the whole prologue and lands in `500/2`.
+
+For a viewer: a cold `500/1` with 1008 = 0 plays the FMV and then the entire
+prologue through `500/17` before reaching `500/2`; a cold `500/1` with 1008 = 1
+is the re-entry and goes straight to `500/2`. `500/2` can be started directly.
+
+### 5b. The prologue is one chain, in one slot
+
+Every script of the map-6 cutscene ends with a `start_script_stacked` naming
+the next: script 13 `args=[0xE]`, 14 `args=[0xF]`, 15 `args=[0x10]`. Running
+`500/13` and letting the chain run reaches script 15 at player frame 4,619 and
+leaves it at 10,202. Two pieces of state the console has when it enters
+script 15 are inherited from 13 and never re-established: the obi — the only
+`set_window_mode` in 15 is inside the block the debug branch jumps over, while
+13's equivalent sits four bytes past its jump target and executes — and the
+BGM, for the same reason. A cold `500/15` correctly has no obi; the console's
+letterbox there is script 13's.
+
+### 5c. Event file 427, the battle chain
+
+```text
+map 591 init -> 427/1 (map 590)  -- fight --> 427/3 (loads 641)
+             -- fight --> 427/4  -- fight --> 427/5 -> 427/6  -- fight --> 427/7
+```
+
+Every "fight" is a `configure_battle` naming the next script. `427/2` is a
+bare `end_script` and nothing names it. There is no NPC branch in 427; the
+talked-to-someone branch that chooses between two scripts is `429/1` versus
+`429/4` in person 170's script.
+
+### 5d. What the walk found on the way
+
+- **Five launches are dead code**: a `start_script` after an `end_script` with
+  no label and no marker — map 20 script 218 lines 50 and 78 (`501/15`,
+  `501/11`), map 626 script 100 line 8 (a stub), person 31 list 1 mode-D line
+  38, and `708/7` line 625. Map 20's script 218 *is* started by the engine —
+  it is the land/kick event of a door polygon — but always at its top, since
+  the only mid-script entry is the schedule-percent walk
+  ([EVD format §4.2](../../evd/format/#42-script-sources-and-the-two-id-spaces)).
+  So `501/11` and `501/15` are unresolved roots.
+- **Marker tables are not section entries.** 1,893 map scripts carry one; all
+  2,100 entries point at `0xF0` marker words, the targets of `seek_marker` —
+  the NPC time-of-day bands, `800/4`'s debug-mode switch — not extra entry
+  points.
+- **Cross-script writes exist.** `508/6` tests flag 1980 one way and, after
+  the battle setup `800/4` sets it from flags 844–845, the other way. A
+  per-script walk sees a contradiction there, so contradictory paths are
+  reported in `gate_notes`, never pruned.
+
+### 5g. Every character file, walked
+
+To be sure the person corpus was the whole of the "character event scripts",
+every EVD in every entity archive was enumerated: kinds 0–8 of all 1,205
+entity ids plus files 184 and 185, checked against an independent count of
+`EVD\x01` magics. The two agree on every kind: 23,149 payloads.
+
+| Where | Payloads | What they are | Event launches |
+|---|---:|---|---:|
+| kind 7 (action data) | 11,322 | per list number: mode-4 (4,257) and mode-2 (5,511) act scripts, mode-D (871), mode-C (683), `RMF1` (731) | **115** |
+| kinds 0–5 | 10,815 | animation-attached trigger scripts: a marker table, `anim_frame_trigger` labels, expressions, sounds, effects, sub-objects; 935 of them under `if_flag(flag=8001, not=0)` | 0 |
+| files 184 / 185 | 278 / 734 | selection scripts and schedule lists; they start act scripts, never an event | 0 |
+| kinds 6, 8 | 0 | `FAS` chains and algorithm leaves, no EVD | — |
+
+So the character event scripts are exactly the kind-7 **mode-2 and mode-D**
+scripts. Of the 13,159 payloads the person corpus did not have, only two
+launch events, both ungated and both from unlabelled entities: 2215's kind-7
+entry 1 mode-2 script 2 starts `800/4`, and 2090's entry 1 mode-D script
+starts `52/10`, whose file is not one of the 107 event files.
+
+## 6. The 49 unresolved roots
+
+No `start_script(mode=1, script_id=N)` for these exists in any event script,
+map script or NPC script, with the current file carried across each whole
+script; no `configure_battle` names them; none is named by an engine
+`SetScriptNumber` constant:
+
+```text
+427/2 500/11 501/11 501/13 501/15 501/18 502/21 504/3 506/19 507/4 509/3
+509/4 601/9 650/11 650/12 650/13 651/7 651/8 750/13 751/11 753/4 753/5
+753/6 753/7 758/7 758/8 800/1 800/2 800/8 801/1 805/1 806/1 807/3
+807/4 807/9 809/5 809/8 809/16 809/18 809/21 809/27 809/45 809/46 809/61
+810/16 810/17 810/18 810/19 810/20
+```
+
+What the engine scan says is possible: `SetScriptNumber` is called with a
+**dynamic** mode-1 script number from
+`CPartySelectWindowManager::ReflectionSelectedMember`,
+`CEventChrInOutCmt::Update`, `CBattleMain::State_VoltyBreakStart`,
+`CBtlConversationRequest::StartShow` and the debug tools. So these are
+engine-started from data — menus, party changes, battle results — or unused.
+Which is which is not established; the shape of most (`set_flags(4740 off)`,
+`set_window_mode`, hero idle) is the field-interaction preamble, consistent
+with menu and system events.
+
+### 6b. The whole no-starter list
+
+§6 is the subset with no map of its own. **82 field scripts have no starter**
+at all. They fall into five shapes:
+
+| Shape | Count | Scripts |
+|---|---:|---|
+| **Loads its own map** — ordinary-looking content, playable as it stands (§4 calls most of them standalone) | 35 | `406/1` `418/1` `418/4` `500/6` `501/17` `502/16` `504/8` `504/9` `504/11` `504/12` `600/2` `601/2` `601/6` `601/8` `601/9` `602/16` `605/5` `606/5` `660/5` `660/8` `703/5` `704/6` `704/7` `708/6` `708/7` `801/2` `801/3` `803/1` `804/1` `804/2` `806/1` `807/8` `811/1` `811/5` `811/7` |
+| **One short talk, no map** — about 117 lines, one `talk_rmf`, the same normalised body in 20 of 24 | 28 | `500/11` `501/11` `501/13` `501/15` `501/18` `502/21` `509/3` `509/4` `650/11` `650/12` `650/13` `651/7` `651/8` `750/13` `751/11` `753/5` `753/7` `805/1` `807/3` `807/4` `809/5` `809/8` `809/16` `809/18` `809/27` `809/45` `809/46` `809/61` |
+| **Empty stub** — `entry; end_script`, nothing at all | 14 | `427/2` `504/3` `506/19` `507/4` `753/6` `758/7` `758/8` `801/1` `809/21` `810/16` `810/17` `810/18` `810/19` `810/20` |
+| **Inventory or party setup, no map** — runs of `change_inventory` and equipment writes (`800/2` gives Jack his starting kit over 2,557 lines; `807/9` strips Camuse's weapons) | 4 | `753/4` `800/2` `800/8` `807/9` |
+| **Other, no map** | 1 | `800/1` |
+
+The last three shapes are not cutscenes. The 35 that load a map are the ones
+worth a second look: any of them could be reached by one of the dynamic
+callers above. `801/3` is in this group and has been run and scored on map 20,
+so "no starter" means the launcher is not in the scripts, not that the script
+is dead.
+
+## 7. Disk file 187: the in-battle scripts
+
+The 34 scripts of the seven high-bit files are not field cutscenes. They wait
+on the battle-progress flag pair 531, drive `battle_character_make_or_delete`
+and `battle_character_send_message`, set party HP and run `talk_rmf` inside
+the fight — the scripted battles. Each file is one self-contained chain from
+its script 1 (7 chains, 27 followers), none loads a map, and **no script in
+any corpus loads a high-bit file** (`load_script_file(force_high_bit=1)`
+appears nowhere), so what starts them is the battle code, not the field: which
+call site is not established. They are in the reference, marked in-battle, and
+out of §4's table.
+
+## 8. Limits
+
+- Gates are read from flag and event-value conditions and the decoded state
+  tests only; the `other:` kinds are shown, not interpreted. An empty gate
+  with a non-empty `other:` list is gated by a runtime test.
+- The verdict for "cast placed by a predecessor" trusts that a character the
+  script animates without snapping was placed by the previous event; it could
+  also be a map NPC. 27 scripts carry it; the 17 above are the ones that also
+  have a predecessor to point at.
+- The 882 bare `start_script(mode=1, …)` in the map scripts — the init tails
+  and the in-battle branches — target the current event file, which is game
+  state; they are counted, not resolved. Three more are ambiguous.
+- 19 `set_person_schedule(character=default, …)` in event scripts set the list
+  of the script's default character, which this pass does not resolve.
+- Verdicts describe *starting* a script. They say nothing about whether a
+  player reproduces it correctly once started.
+
+## 9. Corrections to earlier notes
+
+Recorded so the same readings are not repeated:
+
+- The compare control byte of `CheckCondition`, and the decompiler's names
+  for condition bases `03`, `0B`, `0C`, `0D` and `10`
+  ([control flow §2](../../evd/control-flow/#2-conditions)).
+- "Nothing reads the RBAD table" was wrong: `CGame::ChangeMap` in `step1_01`
+  does.
+- `RunReaction` starts the mode-C and mode-D act scripts with script number
+  `0`, not a dynamic mode-1 script.
+- The schedule-list reader dropped the lower slot of every aliased pair in a
+  file-185 block; fixed, which recovered 20 lists.

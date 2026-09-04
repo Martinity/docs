@@ -1,0 +1,35 @@
+---
+title: Event reference
+description: >-
+  Every shipped event script — the 859 of disk file 186 and the 34 of disk
+  file 187 — with the map it needs, what starts it, the save-state gate on that
+  start, and its verdict.
+sidebar:
+  label: Event reference
+  order: 5
+# The page is one wide table; the right-hand table of contents would only list
+# "Reading a row", and the room it takes is better spent on the columns.
+tableOfContents: false
+---
+
+import EventTable from '../../../components/EventTable.astro';
+
+One row per script, grouped by event file, generated from the event-chain
+analysis ([Chains and verdicts §1](../chains/#1-what-was-read)). The debug
+room's file 802 and its mission-flag tool `800/6` are not here.
+
+## Reading a row
+
+| Column | Meaning |
+|---|---|
+| **Script** | `file/script`, the way the scripts name them, with its [verdict class](../chains/#4-the-verdicts) underneath — hover the badge for the analysis's full wording. A disk-file-187 script is shown as `N/S (high)`. The link is an anchor to the row. |
+| **Map** | The map the script needs, after inheritance ([chains §2](../chains/#2-the-map-an-event-runs-on)). Green: its own load. Orange: inherited, with how — from a predecessor, a battle, or the map that launched it. `any of` followed by several ids means the script runs on whichever of those maps it is launched from; hover an id for the map's name. `none` means no map of its own and nothing to inherit from. |
+| **Started by** | Every start source: `event F/S`, `map M script N`, `contact scripts on N maps`, `after a battle configured by F/S`, `person P, list L, mode script`. "Nothing in the scripts" means no script names it. |
+| **Gate** | The save-state gate on the map-side launches, in the [gate notation](../gates/#3-gate-notation). When several map scripts launch the event, each is named. `runtime only` means the launch is gated only by conditions the field decides. |
+| **more** | Successors with the gate on each start (`to[gate]{runtime}+stacked` — `+stacked` means the caller resumes afterwards), predecessors, the maps whose contact scripts or story scripts launch it, NPC sources and their gates, who puts the person on that list, the battle context, runtime and computed conditions, the map it hands off to, what it preloads, cast placed by a predecessor, what only the debug block sets, and the reasons behind the verdict. |
+
+The filter matches on every visible cell plus the event file's name, the map's
+name, the chain edges and the NPC sources, so `Ridley`, `flag 777`, `person
+265`, `mid-chain` and `map 171` all narrow the table.
+
+<EventTable />

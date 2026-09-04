@@ -13,25 +13,35 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(HERE, '..');
 
 /**
- * The reverse-engineering tree is not part of this repository. Point at it with
+ * The inputs are not part of this repository. Point at their directory with
  * either:
- *   node scripts/build-evd-data.mjs --rs-elf "D:/path/to/rs_elf"
- *   RS_ELF="D:/path/to/rs_elf" node scripts/build-evd-data.mjs
+ *   node scripts/build-evd-data.mjs --source "/path/to/inputs"
+ *   DOCS_SOURCE="/path/to/inputs" node scripts/build-evd-data.mjs
  */
-const argIdx = process.argv.indexOf('--rs-elf');
-const RS_ELF =
-  (argIdx !== -1 ? process.argv[argIdx + 1] : undefined) ??
-  process.env.RS_ELF ??
-  'J:/Radiata Stories/rs_elf';
+const argIdx = process.argv.indexOf('--source');
+const SOURCE =
+  (argIdx !== -1 ? process.argv[argIdx + 1] : undefined) ?? process.env.DOCS_SOURCE ?? null;
+if (!SOURCE) {
+  console.error('cannot generate: pass --source <dir> or set DOCS_SOURCE');
+  process.exit(1);
+}
 
-const NOTES = join(RS_ELF, 'docs/evd_script_notes.md');
-const FORMS = join(RS_ELF, 'docs/evd_source_forms.md');
-const MAPS = {
-  debug: join(RS_ELF, 'debug/radiata.MAP'),
-  eng: join(RS_ELF, 'eng/radiata.MAP'),
-  jpn: join(RS_ELF, 'jpn/radiata.MAP'),
+const NOTES = join(SOURCE, 'docs/evd_script_notes.md');
+const FORMS = join(SOURCE, 'docs/evd_source_forms.md');
+// The release maps come in two generations: the byte-confirmed map beside each
+// build (85 handlers), and the ported map that extends it by structural rules
+// (133 handlers), each row tagged with the rule that placed it. Prefer the
+// ported map where it exists so the release addresses match across builds.
+const releaseMap = (build) => {
+  const ported = join(SOURCE, `docs/radiata_${build}_ported.MAP`);
+  return existsSync(ported) ? ported : join(SOURCE, `${build}/radiata.MAP`);
 };
-const TOOL_PATH = join(RS_ELF, 'tools/evd_tool.py');
+const MAPS = {
+  debug: join(SOURCE, 'debug/radiata.MAP'),
+  eng: releaseMap('eng'),
+  jpn: releaseMap('jpn'),
+};
+const TOOL_PATH = join(SOURCE, 'tools/evd_tool.py');
 // Checked in: it affects the output, so it must not depend on a local scratch
 // directory. Recovered from history with
 //   git show 2e47330:evd/commands.json > scripts/inputs/legacy-opcode-table.json
@@ -47,8 +57,8 @@ if (missing.length) {
   console.error('cannot generate: required input(s) not found');
   for (const [k, p] of missing) console.error(`  ${k.padEnd(6)} ${p}`);
   console.error(
-    `\nreference tree resolved to: ${RS_ELF}` +
-      `\npass --rs-elf <path> or set RS_ELF to override.`
+    `\nsource directory: ${SOURCE}` +
+      `\npass --source <path> or set DOCS_SOURCE to override.`
   );
   process.exit(1);
 }
@@ -73,19 +83,26 @@ for (const e of JSON.parse(readFileSync(LEGACY, 'utf8').replace(/^﻿/, ''))) {
 }
 
 // ── symbol maps ──────────────────────────────────────────────────────────────
-// "  002CC180 0000069C .text    CRadiScript::Command_14(int,...)\t(r_script_run0.cpp)"
+// "  002CC180 0000069C .text    CRadiScript::Command_14(int,...)\t(r_script_run0.cpp)\t[exact]"
+// A ported map appends evidence tags: [exact] for a byte-confirmed body, else
+// the rule that placed the row ([gap-bijection], [tu-align], [forced], …), plus
+// [size:…] notes that are not evidence. An untagged row is byte-confirmed.
 const MAP_RE =
-  /^\s*([0-9A-Fa-f]{8})\s+([0-9A-Fa-f]{8})\s+\.(\w+)\s+(CRadiScript::Command_([0-9a-f]{2})\([^)]*\))\s*(?:\(([^)]+)\))?/gm;
+  /^\s*([0-9A-Fa-f]{8})\s+([0-9A-Fa-f]{8})\s+\.(\w+)\s+(CRadiScript::Command_([0-9a-f]{2})\([^)]*\))\s*(?:\(([^)]+)\))?(.*)$/gm;
 
 const maps = {};
 for (const [build, path] of Object.entries(MAPS)) {
   const m = new Map();
   for (const r of readFileSync(path, 'utf8').matchAll(MAP_RE)) {
+    const tags = [...(r[7] ?? '').matchAll(/\[([a-z-]+(?::[a-z-]+)?)\]/g)]
+      .map((t) => t[1])
+      .filter((t) => !t.startsWith('size:'));
     m.set(r[5].toLowerCase(), {
       addr: '0x' + r[1].toUpperCase(),
       size: parseInt(r[2], 16),
       sig: r[4],
       file: r[6] ?? null,
+      how: tags[0] ?? 'exact',
     });
   }
   maps[build] = m;
@@ -467,6 +484,8 @@ const rows = opcodeHexes.map((hex) => {
     debug: maps.debug.get(hex)?.addr ?? null,
     eng: maps.eng.get(hex)?.addr ?? null,
     jpn: maps.jpn.get(hex)?.addr ?? null,
+    engHow: maps.eng.get(hex)?.how ?? null,
+    jpnHow: maps.jpn.get(hex)?.how ?? null,
     calls: dedupeCalls([...(f ? f.calls : []), ...(legacyCalls.get(hex) ?? [])]),
     masks: f ? [...f.masks] : [],
     params: buildParams(f, op),
@@ -551,10 +570,10 @@ const ts = `/**
  *     documentation
  *
  * Address coverage differs by build. The debug map is a real linker map and
- * covers all 138 handlers. The ENG and JPN maps are derived, and their
- * confirmation policy omits any function whose body does not match the
- * reference build, so each confirms 85. A null means "not confirmed in that
- * build's map", not "does not exist".
+ * covers all 138 handlers. The ENG and JPN maps are derived: 85 handlers are
+ * byte-confirmed against the debug build, and the rest were placed by
+ * structural porting rules recorded per row in \`engHow\` / \`jpnHow\`. A null
+ * address means "not placed in that build's map", not "does not exist".
  *
  * \`evidence\` records how the behaviour line was established:
  *   proven — handler traced AND exercised by at least one shipped script
@@ -600,6 +619,14 @@ export interface EvdCommand {
   debug: string | null;
   eng: string | null;
   jpn: string | null;
+  /**
+   * How the release address was established: "exact" when the function body
+   * matches the debug build byte for byte, otherwise the porting rule that
+   * placed it ("gap-bijection", "tu-align", "forced", …). Null when there is
+   * no address.
+   */
+  engHow: string | null;
+  jpnHow: string | null;
   /** Engine functions the handler calls. */
   calls: string[];
   /** Bit masks the handler applies. */
@@ -634,6 +661,8 @@ ${rows
     debug: ${r.debug ? esc(r.debug) : 'null'},
     eng: ${r.eng ? esc(r.eng) : 'null'},
     jpn: ${r.jpn ? esc(r.jpn) : 'null'},
+    engHow: ${r.engHow ? esc(r.engHow) : 'null'},
+    jpnHow: ${r.jpnHow ? esc(r.jpnHow) : 'null'},
     calls: ${arr(r.calls)},
     masks: ${arr(r.masks)},
     params: [${r.params

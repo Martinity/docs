@@ -95,6 +95,16 @@ export default defineConfig({
           ],
         },
         {
+          label: 'Events — the event chain',
+          items: [
+            { label: 'Disk file 186', slug: 'events/container' },
+            { label: 'How an event starts', slug: 'events/starting' },
+            { label: 'Gates and save state', slug: 'events/gates' },
+            { label: 'Chains and verdicts', slug: 'events/chains' },
+            { label: 'Event reference', slug: 'events/reference' },
+          ],
+        },
+        {
           label: 'About',
           items: [{ label: 'Method and conventions', slug: 'method' }],
         },

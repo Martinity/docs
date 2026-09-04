@@ -1,0 +1,216 @@
+---
+title: Gates and save state
+description: >-
+  The config block a save file holds, what a load restores, how the flag and
+  value tests in front of each event launch were read out of the scripts, and
+  which condition kinds are save state and which are the runtime situation.
+sidebar:
+  label: Gates and save state
+  order: 3
+---
+
+import Tag from '../../../components/Tag.astro';
+
+A launch is gated by the conditions on the path to it. For a tool that wants to
+start an event cold — a viewer, a replay harness, a save editor — the useful
+question is which of those conditions are **save state**, which a save file can
+be set up to satisfy, and which are the **runtime** situation that only exists
+on the field. This page settles what a save holds, how the gates were read, and
+how the condition bases split.
+
+## 1. The config block
+
+Everything a script can test as state lives in one `0x870`-byte block:
+allocated in `CRadiApp::Startup` (`addiu $a0, $zero, 0x870` at `0x002D1C70`,
+`operator new`, `memset`), its pointer at `0x003B2664` (`CRadiApp+0x164`; ENG
+`0x0037F9B4`) <Tag kind="confirmed" />.
+
+| Offset | Contents | Reader |
+|---|---|---|
+| `+0x00`–`+0x0F` | System bytes and bits | restored selectively on load |
+| `+0x10`–`+0x40F` | **8,192 config event flags**, a bit array | `GetConfigEventFlag` `0x0028C860` |
+| `+0x410`–`+0x80F` | **256 global event values** `0`–`255` | `GetEventValueForScript` `0x002E4E90` |
+| `+0x810`–`+0x82F` | Two 16-byte words, saved and restored whole | |
+| `+0x830` | The hero's character id | abstraction `0x26AC` |
+| `+0x834`–`+0x847` | The five party slots | abstractions `0x26AD`–`0x26B1`; condition base `08` |
+| `+0x848`–`+0x84A` | The clock: hour, minute, and the map-entrance word | |
+| `+0x84C`, `+0x84E` | The **queued battle event**: file and script | `Command_16`; `SettingMap`; `CGame::Step1` |
+| `+0x850`, `+0x852` | Sound settings | |
+
+Ids 1000–1009 are **not here**: they are the running script slot's own words
+(`SCR_DATA+0x34`), and 1100–1102 are slot status bits
+([operands §3.2](../../evd/operands/#32-event-values)). There is no "global
+1000+" array.
+
+## 2. What a save holds, and what a load restores
+
+**Save.** `Title_McWindow::CRadiMemoryCard::MakeUserData` (`0x003BFEA0` in
+`step1_00`; ENG `0x0038C9D0`) copies the whole block into the save image with
+one `memcpy(save+0x80, block, 0x870)` (`addiu $a2, $zero, 0x870` at
+`0x003C0138`, the call at `0x003C0224`), after a header carrying the clock, the
+play time, the current character and the party, and before the per-character
+records <Tag kind="confirmed" />. The in-game variant
+`Field_McWindow::CRadiMemoryCard::MakeUserData` (`0x003E8530`) is
+byte-identical at the same offsets. The only `0x870`-sized copies in the whole
+debug image set are these two and the allocation's own `memset`.
+
+**Load.** `CTitle::ReflectLoadDataAndRunField` (`0x003B8680`; ENG
+`0x00385380`) does not copy the block back wholesale. It restores field by
+field: every one of the 8,192 flags through `SetConfigEventFlag`
+(`0x003B89A0`–`0x003B89F4`), every global value `0`–`255` by a word copy from
+`save+0x80+0x410` (`0x003B89F8`–`0x003B8A2C`), the hero if below `0x131`, the
+two 16-byte words, the party through `ReleaseAllParty` and `AddParty`, the
+clock modulo 24 and 60, the sound words and the per-character records. So
+**every flag and every global value survives a save and a load**, and nothing
+else a script can test does.
+
+**A partial load exists.** When `CRadiApp+0x182` is `6` the function takes a
+different path (`0x003B8E60`–) that copies only a handful of flag groups —
+`0x705…`, `0xFA0 + 8(n−1)…` for `n = 1..0x27`, `0x6A3…`, `0x20B…`–`0x20D…` —
+and **no event value**. That value is stored when the load window's result,
+event value 18, is `3` rather than `2`. What that load mode is in the game's
+own terms is not established; both results take the "data loaded" branch in
+the window manager.
+
+## 3. Gate notation
+
+The event reference writes each gate in a fixed vocabulary:
+
+| Form | Meaning |
+|---|---|
+| `flag N set`, `flag N clear` | Config event flag `N`. |
+| `flags N..M is V` / `not V` / `>= V` … | The run of flags `N..M` read as one number, LSB first. |
+| `value N is V` / `not V` / `>= V` / `>` / `<` / `<=` | Global event value `N`. |
+| `state:…` | A save-state test that is not a flag: `state:char 17 schedule list is 2` (base `0D`), `state:hero is on map 163` (base `0C`), `state:hero item 907 count >= 2` (base `10`), `state:char 95 is in the party` (base `08`), `state:default char PD+0x7E not 0` (base `07` with a `CPersonalData` selector). |
+| `computed: …` | The launching script wrote the value on every path before testing it — `change_inventory` then `value 17 not 0` — so it is a check the script makes at run time, not a save-state gate. |
+| `… [may be written by this script first]` | Written on *some* path before the test. Kept as a gate, tagged. |
+| `other:…` | A runtime test: `other:talk button pressed this frame` (base `03`), `other:default char is the hero` (`08`), `facing test` (`09`), `within 2.0 of stand position 50` (`06`), `loaded and not hidden` (`0E`), `line of sight` (`11`), `polygon byte N` (`0B`), `other:time(minutes,hours) >= 1512000` (`04`, in frames: 7:00), `other:runtime(field_110_int) is 2` (`05`), `other:choice is 2` (event value 18, the window's result), `other:random` (value 0), `other:slot value 1008 not 1` (a script-local), `other:global config word is 0x0100` (`0F`), `other:raw` (an undecoded id). |
+
+## 4. How the gates were read
+
+Every launching script — the 859 event scripts, the 8,709 map scripts and the
+9,705 person scripts — was walked from its entry to each launch line, following
+`if_flag` / `unless_flag` / `if_value` / `unless_value` in both the goto form
+and the block form, every `branch` and `end_if` whether decoded or raw, every
+condition base from `01` to `11` read per its handler
+([control flow §2.3](../../evd/control-flow/#23-condition-bases)), `jump`,
+`end_script` and the `seek_marker` jump table. A launch's gate is the set of
+conditions that hold on **every** path from the entry to that line — the
+intersection at joins — which is what the game's flags must be for the launch
+to happen at all. Where the init script arms a map-local script with
+`start_script(mode=3)`, the init's own gate on that arming site is added.
+
+The walker also carries **the current event file** along each path. That
+retired an earlier file-order guess: 84 apparent map launches were the bare
+`start_script(1)` tail on the in-battle branch of an init script whose story
+branch had loaded a file and ended. On the path that reaches the tail no load
+ran, so it inherits the runtime current file, and is not a launch of that file.
+
+A test whose goto goes *backwards* is a poll loop — `unless_value(18, is=3,
+goto=loc_1E4C)` waits for a window — and its exit condition is transient, so it
+is not recorded. A flag another script rewrites between two tests (`508/6`
+tests flag 1980 one way, and after the battle setup `800/4` sets it from flags
+844–845, the other way) is invisible to a per-script walk; the gate then lists
+both readings and a note says so, rather than pruning.
+
+**Two decodes were corrected on the way, and both changed gates.** The
+comparison control byte of `CheckCondition`
+([control flow §2.1](../../evd/control-flow/#21-the-comparison-protocol)): the
+`flags 539..541 >= 3` chapter counters inside every Event Watcher gate had read
+as an equality against an event value. And condition base `03`, which the
+decompiler called a config-flag mask, is the controller-button test that ends
+every contact script unless the talk button went down this frame.
+
+### 4.1 Global gates are stripped
+
+Five tests sit under almost every launch and say nothing about the story, so
+the per-launch columns omit them:
+
+| Gate | What it is |
+|---|---|
+| `flag 220` | The engine's **in-battle** flag, config flag `0xDC`. Tested at the top of 881 of 882 map init scripts. **No script anywhere sets or clears it**; its only writer is `CBattleMain::TaskEnd` (`0x00420A68`, `SetConfigEventFlag`) and its 43 readers are all battle contexts. A launch that showed `flag 220 clear` meant only "not during a battle". |
+| `flag 0` | The movement lock. |
+| `flag 8000`, `value 1009` | "Load Event in Debug Mode" and the copy every script takes of it. The block it guards is the debug build's diagnostic path, skipped on the console. |
+| `flags 4740..4741`, `value 1100` | The pair every script tests and sets on entry. |
+
+## 5. Coverage
+
+With those removed, the story gates cover:
+
+| Launch path | Events with a save-state gate |
+|---|---|
+| map script → event | 253 of 299 (the other 46 sit under `other:` or `computed:` conditions only — almost all contact scripts) |
+| NPC act script → event | 73 of 75 (the other 2 are gated by time of day or an undecoded condition) |
+| event → event | 25 of 310 (most successors start unconditionally) |
+
+`gates` is a lower bound in one sense: a launch whose save-state gate is empty
+but whose `other:` list is not is gated by a runtime test, never by "no flags
+needed".
+
+## 6. Condition bases as gates
+
+The twenty condition handlers split cleanly. This is the same table as
+[control flow §2.3](../../evd/control-flow/#23-condition-bases) reduced to the
+one question that matters here:
+
+| Reads save state | Reads the runtime situation |
+|---|---|
+| `01` flag run, `02` event value, `04` the clock, `07` with a `CPersonalData` selector, `08` hero / party / id range, `0C` map number, `0D` schedule list, `10` inventory count | `03` controller buttons, `05` `CRadiApp+0x110` / `+0x124`, `06` distance, `07` with a motion or collision selector, `09` facing, `0A` script running, `0B` polygon byte, `0E` character present, `0F` global config word, `11` line of sight |
+
+Base `07` is on both sides because `CCharacterManager::pfnParamTbl` mixes
+them: selectors `0x09`, `0x0D`, `0x0F`–`0x12`, `0x1E` and `0x48` read bytes of
+the person's `CPersonalData` (`+0x7A`, `+0x10` bit 4, `+0x7C`–`+0x7E`, `+0x81`,
+`+0x83`, `+0x11`), which the per-character save records carry; `0x1F`, `0x20`,
+`0x26`, `0x28`, `0x41` and `0x45` read the current motion, the polygon under
+the character, or `CCharaEventLeaveManager::CheckLeave`. The NPC gates test the
+`CPersonalData` bytes in 28 places (`state:default char PD+0x7E not 0`), and
+what those bytes mean beyond "per-character bytes the scripts read and write"
+is not established — `+0x11` is the friend list, `+0x82` is script-owned
+storage ([operands §3.4](../../evd/operands/#34-property-0x1d-storage-the-game-never-reads)).
+
+## 7. Worked example: `402/1`
+
+`402/1` is Ridley's room after the Fayt Armor event. Map 171's init script
+launches it at line 16:
+
+```text
+if_flag(flag=220, yield=1, not=1) {                 # not in a battle
+    if_flag(flag=0, is=1, goto=loc_00A0)            # movement lock -> skip
+    if_flag(flag=777, is=0, goto=loc_00A0)          # "Enable Fayt Armor Cutscene at Ridley's Room" clear -> skip
+    change_inventory(... item_id=335 ...)           # Fayt Armor
+    if_value(event_value=17, is=0, goto=loc_00A0)   # value 17 == 0 -> skip
+    if_flag(flag=0, is=1, goto=loc_009C)
+    unless_flag(flag=777, is=1, goto=loc_009C)
+    load_script_file(force_high_bit=0, file=0x0192) # 402
+    clear_flag(flag=777)
+    trigger(action=0, trigger_type=0x02, trigger_flags=0x0100, yield=1)
+    start_script(mode=1, default_char=0, script_id=1)
+```
+
+So the save-state gate is **`flag 777 set`**, plus the global "not in battle,
+not movement-locked"; the script clears 777 as it launches, which is why the
+scene plays once. `value 17 not 0` is not a story value: `change_inventory`
+(`Command_19`) **always** stores its result in global event value 17
+(`sw $s2, 0x454($v1)` at `0x002E97B4`), mode 0 being the number of items
+actually added, so the test is "the Fayt Armor really went into the inventory".
+The walker shows it as `computed: value 17 not 0`.
+
+The same walk gives `660/3` = `flag 1660 clear & flag 1685 set` on map 393;
+`413/1` = `flag 820 set & flag 821 clear & flag 826 clear & flags 773..775 is
+0`; `403/3` = `flag 1950 set & flags 773..775 not 2 & flags 782..783 is 2`.
+`750/1` from `516/2` has no story gate at all: its launcher tests only values
+it computes itself.
+
+## 8. What is not established
+
+- What the partial load mode (`CRadiApp+0x182 == 6`, window result `3`) is in
+  UI terms, and why block bytes `+0x862`–`+0x86F` are saved but never seen
+  restored.
+- Whether `CPersonalData::SetPossessionItem` clamps to a capacity — what makes
+  `change_inventory`'s result come back `0`.
+- Nothing in the images or scripts writes flags 891 and 892, which mask the
+  talk and second action buttons out of base `03` and out of the field
+  controller.
+- The meaning of the `CPersonalData` bytes the NPC gates test.
+- Flag 8001, which gates 935 animation trigger scripts in the character
+  archives. It is not the debug flag 8000.

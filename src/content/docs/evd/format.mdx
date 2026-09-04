@@ -12,7 +12,9 @@ import Tag from '../../../components/Tag.astro';
 
 `EVD` is the bytecode format that drives cutscenes, NPC behaviour and battle
 setup. These pages describe the container, the instruction encoding, the
-execution model and the operand conventions. They are a format reference.
+execution model and the operand conventions. They are a format reference. How
+the shipped event files are packed on the disc, and how one event leads to the
+next, is the [Events](../../events/container/) section.
 
 ## 1. Provenance
 
@@ -54,6 +56,10 @@ multiply by 4 for a byte offset.
 +0x0C   ...       command region, runs to end of file
 ```
 
+`SetScriptNumber` checks only the low 24 bits of the first word against
+`"EVD"` (`0x445645`, at `0x002E3FC4`–`0x002E3FD8`), so the `\x01` is not part
+of the test.
+
 Execution begins at `+0x0C`, and there is no length field and no code/data
 section table: reachable paths from that address are decoded as commands.
 
@@ -65,32 +71,54 @@ end-of-file will desynchronise on them and invent commands that never execute.
 
 ### 2.1 Header flags
 
-A small field at `+0x04`. Observed values across all 7,462 parsed files:
+The word at `+0x04` is read as a byte by `CRadiScript::SetScriptNumber` when a
+script is started, and all four bits that occur in shipped files are consumed
+there <Tag kind="confirmed" />:
 
-| Value | Files |
-|---:|---:|
-| `0` | 2,693 |
-| `1` | 745 |
-| `2` | 80 |
-| `3` | 2,719 |
-| `4` | 1 |
-| `6` | 201 |
-| `7` | 1,022 |
-| `9` | 1 |
-| **Total** | **7,462** |
+| Bit | Meaning | Evidence |
+|---|---|---|
+| `0` | Run the first `StepProcess` slice **synchronously inside the start call**, before it returns to the caller. The slot's status byte 0 carries bit 4 while that slice runs. | `lbu v0, 4(evd)` / `andi v0, v0, 1` at `0x002E40D8`; the `StepProcess` call at `0x002E4144` |
+| `1`–`2` | **Duplicate-start scope.** `0` = no check. `1` = refuse if a script with the same mode and script number is already running. `2` = refuse if one with the same character and variant is. `3` = both. A refused start sets bit 3 of the running slot's status byte 1 (readable as event value 1102) and returns `−3`. | `0x002E3FE8`–`0x002E40C8`, through `SearchScriptSlot` (`0x002E44D0`) |
+| `3` | **Mode-2 scripts only:** suppress the per-frame rebind of the default character (status byte 1 bit 4). Clear means the character is re-resolved every frame. | `0x002E41CC`–`0x002E4218` |
 
-Four bits are in use — values `4` and `9` occur once each, and `9` is the only
-file that sets bit 3. **What any of them select has not been established**: no
-reader of this word has been located. `SetScriptNumber` reads it as a byte and
-branches on the values `1`, `2` and `3`:
+The bits are read separately rather than as one value:
 
 ```asm
-lbu   v0, 0x04(evd_base)
+002E3FE8  lbu    v0, 0x04(evd_base)
+002E3FEC  dsll32 v0, v0, 0x1d
+002E3FF0  dsrl32 v1, v0, 0x1e      ; bits 1-2: duplicate-start scope
+002E3FF4  beqz   v1, no_duplicate_check
+002E3FF8  addiu  v0, zero, 3
+002E3FFC  beq    v1, v0, scope_both
 ...
-beq   value, 3, case_3
-beq   value, 2, case_2
-beq   value, 1, case_1
+002E40D8  lbu    v0, 0x04(evd_base)
+002E40DC  andi   v0, v0, 1         ; bit 0: synchronous first step
+...
+002E41CC  lbu    v0, 0x04(evd_base)
+002E41D0  dsll32 v0, v0, 0x1c
+002E41D4  dsrl32 v0, v0, 0x1f      ; bit 3: no per-frame rebind (mode 2 only)
 ```
+
+Observed values across all 7,462 parsed files:
+
+| Value | Files | Bits set |
+|---:|---:|---|
+| `0` | 2,693 | none |
+| `1` | 745 | synchronous first step |
+| `2` | 80 | duplicate scope 1 |
+| `3` | 2,719 | synchronous, duplicate scope 1 |
+| `4` | 1 | duplicate scope 2 |
+| `6` | 201 | duplicate scope 3 |
+| `7` | 1,022 | synchronous, duplicate scope 3 |
+| `9` | 1 | synchronous, no rebind |
+| **Total** | **7,462** | |
+
+:::note[Correction]
+Earlier versions of this page said no reader of this word had been located, and
+described `SetScriptNumber` as branching on the values `1`, `2` and `3`. The
+three-way branch is on the two-bit field in bits 1–2, and bits 0 and 3 are
+tested on their own. Read out of `SetScriptNumber` at the addresses above.
+:::
 
 ### 2.2 Marker table
 
@@ -122,6 +150,12 @@ addu  v0, a1, v0         ; return evd_base + target * 4
 ```
 
 All 2,797 files with a non-zero table parse cleanly under this layout.
+
+The table is a lookup structure, not a list of entry points. Four readers walk
+it and none of them is a script start in the ordinary sense: the marker-seek
+command ([control flow §3](../control-flow/#3-marker-seeks)), the stop handler
+and the schedule-percent walk ([§4](../control-flow/#4-0xf0-markers)), and the
+animation frame trigger.
 
 ## 3. Instruction encoding
 
@@ -184,8 +218,8 @@ After the handler returns, `StepProcess` acts on the result:
 | Return | Effect |
 |---|---|
 | `1` | Stop processing this script for now. |
-| `2` | Set bit 31 on the command word and continue — a branch was taken. |
-| `<= 0` | For opcodes below `0xF0`, advance `SCR_DATA+0x0C` by `extra_word_count * 4`. |
+| `2` | Set bit 31 on the command word and continue — a branch was taken, and the handler has already rewritten the cursor. |
+| `<= 0` | If the cursor is now `0` the handler ended the script: return. Otherwise, for opcodes below `0xF0`, advance `SCR_DATA+0x0C` by `extra_word_count * 4`. |
 
 Individual handlers can still override or modify cursor behaviour, so command
 body decoding must be verified per opcode.
@@ -210,7 +244,12 @@ Bit 31 — bit 7 of the flags byte — is the **keep-going bit**:
 
 This is why nearly every shipped command carries `0x80`, and why a taken branch
 (handler return `2`) forces the bit on: execution must continue at the jump
-target. Other bits of the flags byte are rare and no general meaning has been
+target. Two consequences follow, and both matter to an emulator:
+
+- A **taken branch never yields**, whatever its own flag byte says.
+- A branch that is **not** taken keeps its own yield bit.
+
+Other bits of the flags byte are rare and no general meaning has been
 established.
 
 ### 3.3 The `0xF0` exception
@@ -225,55 +264,103 @@ It is also why `Command_ff` consumes only its header despite a raw word of
 
 ## 4. Execution model
 
-A script runs in a **script slot**. `CRadiScript::SetScriptNumber` bounds slots
-to 48 (`slti $at, $s4, 0x30`), and `GetEmptySlot` allocates one when the caller
-passes a negative index.
+A script runs in a **script slot**. There are **48 slots of `0xE0` bytes**, laid
+out as an array at the start of the `CRadiScript` object: `SetScriptNumber`
+bounds the index with `slti $at, $s4, 0x30` (`0x002E3E30`) and computes the
+record as `slot * 0xE0` (`0x002E3E90`–`0x002E3E9C`). `GetEmptySlot`
+(`0x002E45A0`) allocates one when the caller passes a negative index, and
+starting into a slot whose cursor is non-zero is refused with `−4`.
 
-Each running script has a state block, referred to here as `SCR_DATA`. The
-fields established are:
+`CRadiScript::FuncRun` (`0x002E2E90`) is one game frame of script execution: it
+visits the slots in index order, services deferred starts, runs each slot's
+wait records and then its `StepProcess`. What the format needs from that loop
+is the slot record.
 
-| Offset | Contents |
-|---|---|
-| `+0x08` | The EVD base pointer |
-| `+0x0C` | The script cursor — a pointer into the command region. Branches write it. |
-| `+0x10` | Default character id |
-| `+0x12` | Default character variant |
-| `+0x34` … `+0x58` | Ten script-local event values, ids 1000–1009 |
-| `+0x60`, `+0x70` | Float and angle slots written by the expression command |
-| `+0x80` | Eight trigger slots |
+### 4.1 `SCR_DATA` — the slot record
 
-For the common raw files, `SetScriptNumber` initialises the slot like this,
-which is what puts the first command word at `EVD+0x0C` <Tag kind="confirmed" />:
+Each running script has a state block of `0xE0` bytes, referred to here as
+`SCR_DATA` <Tag kind="confirmed" />:
+
+| Offset | Contents | Evidence |
+|---|---|---|
+| `+0x00` | Status. Low nibble = **start mode**, which container the script came from ([§4.2](#42-script-sources-and-the-two-id-spaces)). Bit 4 = inside the synchronous first step. Bit 5 = the stop marker has already run. Bit 6 = deferred start, waiting for an event file to load. Bit 7 = has a default object name. | `SetScriptNumber` `0x002E4118`–`0x002E4130`; `Command_f0` `0x002FD338`; `FuncRun` `0x002E2F50` |
+| `+0x01` | Status. Bits 0–1 = waiting state. Bit 2 = trigger-check result. Bit 3 = a duplicate start was refused this frame. Bit 4 = re-resolve the default character every frame. Bits 0–1, 2 and 3 are readable from a script as event values 1100, 1101 and 1102. | `0x002E40AC`–`0x002E40C8`, `0x002E41E0`; `GetEventValueForScript` `0x002E4F98`–`0x002E4FC0` |
+| `+0x02` | Suspend byte, copied from the character object on rebind. Non-zero skips the slot for the frame. | `FuncRun` `0x002E2F44`, `0x002E3094` |
+| `+0x04` | Script number, or the pending script of a deferred start. | `0x002E4134` |
+| `+0x08` | The EVD base pointer. | `0x002E4138` |
+| `+0x0C` | The script cursor — a pointer into the command region. `0` means the slot is free. Branches write it. | `0x002E413C` |
+| `+0x10`, `+0x12` | Default character id and variant. | `0x002E4140`, `0x002E4148` |
+| `+0x14` | Default object name. | `SetDefaultObjectName` `0x002E4330` |
+| `+0x28` | The float passed to a deferred start, re-issued when the file arrives. | `0x002E3F94`; `FuncRun` `0x002E2F88` |
+| `+0x34` … `+0x5B` | Ten script-local event values, ids 1000–1009. | `SetEventValueForScript` `0x002E4E68`–`0x002E4E78` |
+| `+0x60`, `+0x70` | Float and angle vector slots written by the expression command. | `Command_14` `0x002EA590` |
+| `+0x80` … `+0xDF` | Eight 12-byte trigger records the wait command installs. | `Waiting` `0x002E80C0`, stride at `0x002E8154` |
+
+For a plain start, `SetScriptNumber` initialises the slot like this, which is
+what puts the first command word at `EVD+0x0C` <Tag kind="confirmed" />:
 
 ```asm
-addiu v0, evd_base, 0x0c
-sw    evd_base, 0x08(scr_data)
-sw    v0,       0x0c(scr_data)
+002E41A0  and   v1, a1, -0x10
+002E41A4  or    v1, v1, mode       ; low nibble of status byte 0 = start mode
+002E41A8  sb    v1, 0x00(scr_data)
+002E41AC  sw    script, 0x04(scr_data)
+002E41B0  sw    evd_base, 0x08(scr_data)
+002E41B4  sw    v0,       0x0c(scr_data)   ; v0 = evd_base + 0x0c
+002E41B8  sh    chara,    0x10(scr_data)
+002E41BC  sh    variant,  0x12(scr_data)
 ```
 
 Commands that transfer control — jumps, conditional branches, marker seeks —
 work by writing `SCR_DATA+0x0C` and returning a status that tells the stepper
 not to advance normally.
 
-### 4.1 Two id spaces
+### 4.2 Script sources, and the two id spaces
 
-Two different id spaces are involved, and conflating them is the single easiest
-mistake to make with this format:
+`SetScriptNumber(slot, mode, script, character, variant, float)` is the one
+entry point for starting any script, and the **mode** says which container the
+script number indexes. `GetScriptAddress` (`0x002E3A20`) resolves it
+<Tag kind="confirmed" />:
+
+| Mode | Script number indexes | Evidence |
+|---:|---|---|
+| `1` | The **event file** loaded by `LoadScriptFile`: outer Kods member = script number, SLZ-decompressed, then inner Kods member 0. Member 1 is the script's `RMF1` message file. | `0x002E3A98`–`0x002E3C78` |
+| `2`, `4` | The character's action data, kinds 2 and 0 — NPC act scripts. | `0x002E3C80`–`0x002E3CD4` |
+| `3` | The **current map's** nested script table (`gpBackGround+0xB4`). | `0x002E3CD8`–`0x002E3D10` |
+| `0xB` | The schedule-selection file held by the data centre (`+0x48`). | `0x002E3D18`–`0x002E3D6C` |
+| `0xC`, `0xD` | The character's action data, kinds 5 and 4, used directly as the EVD — the kick and talk reaction scripts. | `0x002E3D70`–`0x002E3D9C` |
+
+Two different id spaces are therefore involved in the commands, and conflating
+them is the single easiest mistake to make with this format:
 
 - **`Command_06`** calls `CRadiScript::LoadScriptFile`. Its operand is a
-  **global event file id**.
-- **`Command_04`** and the stacked-start variant call
-  `CRadiScript::SetScriptNumber`. Their operand is a **script number inside the
-  file that is already loaded**.
+  **global event file id**. Argument bit 0 forces bit 15 of that id, which
+  selects the second event table and disk file 187 instead of 186
+  (`0x002EB464`–`0x002EB47C`; [Events §1](../../events/container/)).
+- **`Command_04`** and the stacked-start variant `Command_01` call
+  `SetScriptNumber`. Their operand is a **script number inside the container
+  the mode names** — for mode 1, the event file that is already loaded.
 
-So in event file 516, a start with operand `5` runs script `516_05`, not event
-file 5. The corpus is consistent with this: stacked starts only ever use values
-`1..24`, the range of script numbers a single file holds.
+So in event file 516, a mode-1 start with operand `5` runs script `516_05`, not
+event file 5. The corpus is consistent with this: stacked starts only ever use
+values `1..24`, the range of script numbers a single file holds.
 
-When a marker argument is used in `SetScriptNumber`, it calls
-`GetMarkerAddress(evd_base, marker_index)`. If a target is found the returned
-marker command is inspected; if accepted, the cursor becomes `marker + 4`, and
-if not, the cursor can fall back to the original script pointer.
+**Entering a script anywhere but its first command.** The sixth parameter, a
+float, is the only way. When it is non-zero `SetScriptNumber` walks the marker
+table from index 0 and moves the cursor to just after the last consecutive
+`0xF0` marker of mode `2` whose 20-bit value, divided by 100, is at most the
+float (`0x002E4220`–`0x002E42EC`; `100.0f` is the `lui 0x42C8` at
+`0x002E42AC`). Of the 43 call sites in the debug build, 41 pass `0.0`; the
+exceptions are `CCharacterPerson::ActRun`, which passes an NPC's schedule
+percentage, and `FuncRun` re-issuing a deferred start with the float the
+original caller gave. Every other script — every cutscene, map script and
+reaction — starts at `+0x0C`.
+
+:::note[Correction]
+Earlier versions described "a marker argument" to `SetScriptNumber` that was
+looked up through `GetMarkerAddress` and accepted or rejected. There is no
+marker index parameter. The walk is driven by the float, filters on marker mode
+`2`, and compares the marker's value against it.
+:::
 
 ## 5. Worked example
 
@@ -290,7 +377,8 @@ if not, the cursor can fall back to the original script pointer.
 0070  00 00 00 00 00 00 00 00
 ```
 
-Header: magic, flags `3`, no marker table. Execution starts at `+0x0C`.
+Header: magic, flags `3` (synchronous first step, refuse a duplicate of the
+same script), no marker table. Execution starts at `+0x0C`.
 
 The first command word is `80 00 01 10` little-endian = `0x80000110`:
 
@@ -322,14 +410,15 @@ clear flag 0
 end script                                                     ; yields
 ```
 
-Every byte of the file is accounted for.
+Every byte of the file is accounted for. This is the generic "talk to a
+signpost" event: 103 contact scripts on 48 maps launch it
+([Events §2](../../events/starting/)).
 
 ## 6. What is not established
 
 Stated plainly, because a format document that hides its gaps causes downstream
 errors.
 
-- **Header flags at `+0x04`.** Three bits in use, no reader located.
 - **About 15,000 operand fields — roughly 1.1% of decoded lines** — are
   preserved and round-trip correctly but have no established meaning. The
   largest groups:
@@ -340,14 +429,18 @@ errors.
     specific readers.
   - `Command_35`'s character sub-object entries. The mask and per-slot
     structure are understood; what each sub-object type does is not.
-  - `condition_word1` on the config-flag-mask condition. It is a mask of
-    outstanding requirements — `CheckCondition_03` clears bit 2 when config
-    flag `0x37B` is set and bit 3 when `0x37C` is — but the per-bit table
-    lookup handling the remaining bits has not been decoded correctly yet.
+- **Condition bases `12` and `13`** (`CheckCondition_18` and `_19`) are
+  installed and occur in the battle-side archive scripts, but their payloads
+  have not been traced ([control flow §2.4](../control-flow/#24-bases-not-yet-decoded)).
 - **15 opcodes are installed but unused** by any shipped script, so their
   operand layouts rest on handler tracing alone with no real data to check
   against. They are marked `traced` in the
   [opcode reference](../opcodes/).
 - **Symbol coverage.** Names for characters, items, maps and music come from
-  community-compiled tables and are good; **flag names cover only 175 of
-  8,191**, so most flag ids appear as bare numbers.
+  community-compiled tables and are good; **flag names cover only 271 of
+  8,192**, so most flag ids appear as bare numbers.
+
+Two earlier entries in this list are closed: the header flags at `+0x04`
+([§2.1](#21-header-flags)), and the second payload word of condition base `03`,
+which turned out to be a controller-button mask rather than a flag mask
+([control flow §2.3](../control-flow/#23-condition-bases)).

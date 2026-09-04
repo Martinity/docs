@@ -68,21 +68,21 @@ general-purpose expression command and the single most-used opcode, and
 Click an opcode for its handler address in each build. Coverage is uneven, and
 the reason matters:
 
-| Build | Handlers with a confirmed address |
+| Build | Handlers with an address |
 |---|---:|
 | Debug (`SLUS-21262` prototype) | 138 of 138 |
-| ENG (USA release) | 85 of 138 |
-| JPN (`SLPM-65800` release) | 85 of 138 |
+| ENG (USA release) | 133 of 138 |
+| JPN (`SLPM-65800` release) | 133 of 138 |
 
 The debug build ships a real linker map, so every handler is named and placed.
-The release maps are **derived**: their confirmation policy omits any function
-whose body does not match the reference build, so 53 handlers are simply not
-pinned down there. A missing release address means "not confirmed in that map",
-not "absent from that build" — the handler is installed in the dispatch table in
+The release maps are **derived** from it: 85 handlers have bodies that match
+the debug build byte for byte, and those agree exactly with the addresses
+recovered independently from each release's dispatch-table dump; the rest were
+placed by matching the surrounding code, and the ones checked by hand for these
+pages (`0x04`, `0x06`, `0xC5`) match the debug build instruction for
+instruction. A missing release address means "not placed in that map", not
+"absent from that build" — the handler is installed in the dispatch table in
 all three.
-
-The 85 that are confirmed agree exactly with the addresses recovered
-independently from the dispatch-table dump, in both release builds.
 
 ## All opcodes
 

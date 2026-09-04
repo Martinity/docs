@@ -2,7 +2,7 @@
 /**
  * Invariant checks for src/data/evd-commands.ts.
  *
- * Runs against the checked-in dataset alone — no corpora, no reference tree —
+ * Runs against the checked-in dataset alone — no corpora, no external inputs —
  * so it is reproducible in CI. Corpus-derived facts are pinned here as
  * constants with a note on how they were established; if the corpora are
  * re-scanned and a constant changes, this file changes with it.

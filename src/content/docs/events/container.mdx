@@ -1,0 +1,326 @@
+---
+title: Disk file 186 — the event container
+description: >-
+  Where the cutscene scripts live on the disc, how the engine finds one by
+  event file id and script number, what the 107 event files hold, and how a
+  file is loaded and its scripts started.
+sidebar:
+  label: Disk file 186
+  order: 1
+---
+
+import Tag from '../../../components/Tag.astro';
+
+The game's cutscenes are **859 EVD scripts packed into disk file 186**, in 107
+event files numbered 400 to 811. A second, much smaller container, disk file
+187, holds 34 scripts that run inside scripted battles. This page is about the
+container: how the engine addresses a script inside it, what is there, and the
+loading path. The [EVD format](../../evd/format/) pages describe the bytecode
+each script is written in; [How an event starts](../starting/) describes what
+runs it.
+
+Everything on this page was read from the USA disc image and from the debug
+build's `step0_00` overlay, with the linker map's names. The member layout was
+verified by walking the container for every one of the 859 scripts.
+
+## 1. Addressing: there are no filenames
+
+Nothing in the game refers to a file by name; the only identifier is a **TOC
+index**, and the data centre's own index — disk file 5 — says what each one
+holds. `CRadiDataCenter::LoadDataIndex` (`0x002C28D0`) reads file 5 whole and
+runs `Rel2AbsKodsAddr` on it, after which its Kods slots are pointers to
+tables. Two of those tables are the event tables <Tag kind="confirmed" />:
+
+| Slot of disk file 5 | Table | Entries | Addressed disk file |
+|---:|---|---:|---|
+| `0` | The event files. Pointer kept at data centre `+0x08`. | 812 (one is the terminator) | **186** |
+| `9` | The high-bit event files. Pointer kept at `+0x2C`. | 8 (one is the terminator) | **187** |
+
+`CRadiDataCenter::GetEventScriptFileDatas(id, &file, &sector, &size)`
+(`0x002C27F0`) is the whole lookup:
+
+```asm
+002C2810  lw    v1, 8(a0)             ; data centre index; -1 if not loaded
+002C2828  andi  v0, a1, 0x8000        ; bit 15 of the event file id
+002C282C  bnez  v0, high
+002C2834  lw    a0, 8(v1)             ; table: slot 0 of file 5
+002C283C  addiu s0, zero, 0xba        ; disk file 186
+002C2840  lw    a0, 0x2c(v1)          ; high: table: slot 9 of file 5
+002C2848  addiu s0, zero, 0xbb        ; disk file 187
+002C2850  and   a1, a1, 0x7fff        ; strip the bit
+002C285C  jal   GetKodsDataOffset     ; (table, id, &offset, &size)
+002C2878  lw    v0, 0x58(sp)          ; size 0 = no such event file
+002C2890  sw    s0, (s3)              ; disk file
+002C289C  srl   v1, v1, 0xb           ; byte offset -> 2048-byte sector
+```
+
+So an **event file id** is an index into an external Kods table — the same
+header shape the character archives use, where the table describes byte
+ranges of another file: entry `i` gives the byte range of event file `i`
+inside disk file 186, and its size is the distance to the next entry, so the
+last slot is a terminator and ids run `0`–`810`. Only 107 of them are live. **Bit 15 of the id selects the
+second table and disk file 187**; `Command_06`'s argument bit 0 sets it
+(`0x002EB47C`), which the decompiler spells `force_high_bit=1`. No shipped
+script does so ([§3](#3-disk-file-187)).
+
+## 2. The member layout
+
+Each event file is itself an internal Kods whose members are the scripts,
+numbered from 1; each member is SLZ-compressed and, decompressed, is another
+Kods holding the bytecode and the script's messages. `GetScriptAddress` mode 1
+(`0x002E3A98`–`0x002E3C78`) reads it exactly so, and the walk over the disc
+confirms it for all 859 scripts <Tag kind="confirmed" />:
+
+```text
+disk file 186                       2,940,928 bytes on the USA disc
+ └─ event file <id>                 byte range from the event table (slot 0 of file 5)
+     └─ Kods, member <script>       internal Kods; the control word's entry count is the
+         │                          highest script number + 1, and member 0 is never used
+         └─ SLZ                     one compressed block
+             └─ Kods { 0: EVD\x01 bytecode, 1: RMF1 messages }
+```
+
+Three files, read from the disc:
+
+| Event file | Outer Kods | Control word | Members | Member 1 |
+|---:|---:|---|---|---|
+| `400` | 6,144 bytes | `0x00020002` | 1 script | SLZ 6,128 B → Kods 13,160 B → `EVD` 11,212 B + `RMF1` 1,932 B |
+| `500` | 75,776 bytes | `0x00020013` | 18 scripts | SLZ 7,112 B → Kods 20,276 B → `EVD` 18,048 B + `RMF1` 2,212 B |
+| `810` | 12,288 bytes | `0x00020015` | 20 scripts | SLZ 704 B → Kods 1,436 B → `EVD` 1,180 B + `RMF1` 240 B |
+
+The control word's low 16 bits are the entry count and bits 16–19 the offset
+shift (`2`, so stored offsets are in words); the `+1` in the count is slot 0,
+which holds nothing in any event file. That is why script numbers start at 1
+and why `SetScriptNumber`'s script number is used as the member index without
+adjustment.
+
+The `RMF1` member is the script's own dialogue, in the
+[RMF message format](../../rmf/container/); `talk_rmf(message_id=N)` in a
+script indexes it. It is the reason a script and its text always ship together
+and never drift apart.
+
+`GetScriptAddress` caches each decompressed script under `this+0x2A44` by
+script number, so a script is decompressed once per file load.
+
+## 3. Disk file 187
+
+The high-bit table addresses a 45,056-byte container holding **7 event files
+with 34 scripts**, ids `1`–`7` — `0x8001`–`0x8007` as a script would pass
+them. They are the scripted battles: each file is one chain from its script 1,
+none loads a map, and they drive the battle character commands and in-fight
+dialogue. **No script in any corpus loads a high-bit file**, so what starts
+them is the battle code, not the field; which call site is not established
+([Chains §7](../chains/#7-disk-file-187-the-in-battle-scripts)).
+
+## 4. The other script containers
+
+Event files are one of five places the engine keeps EVD scripts, and the
+[start modes](../../evd/format/#42-script-sources-and-the-two-id-spaces) name
+them. For the event chain the other four matter because they *launch* events:
+
+| Container | Where | Scripts | Read by |
+|---|---|---:|---|
+| **Map script tables** | each map archive's nested Kods (slot 2); member 0 is the map's init script | 8,709 in 882 maps | mode `3` |
+| **Character action data** | datacenter kind 7 of the character's own archive, one entry per schedule list number; sub-slots `0` mode-4 act script, `1` `RMF1`, `2` mode-2 act script, `4` talk script, `5` kick script | 11,322 payloads in 523 entities | modes `2`, `4`, `0xC`, `0xD` |
+| **Schedule lists** | disk file 185, one 2,048-byte block per person through file 5's slot 7 | 734 | the person's own slot, mode `0xF` |
+| **Selection scripts** | disk file 184, one Kods of 278 scripts | 278 | mode `0xB` |
+
+The animation archives (kinds 0–5) hold another 10,815 EVDs — frame-triggered
+expression and effect scripts — and none of them launches an event
+([Chains §5g](../chains/#5g-every-character-file-walked)).
+
+## 5. What the 107 event files hold
+
+Script counts read from the disc; names from the community symbol table, which
+names every file. Files 400–437 are side quests and encounters; 500–516 the
+first half of the story; 600–606 and 650–660 the two branches after the path
+split; 700–708 and 750–760 the two second halves; 800–811 system events,
+engine-rendered FMV stand-ins and the movement-restriction messages.
+
+### 400–437 — 38 files, 164 scripts
+
+| File | Scripts | Name |
+|---:|---:|---|
+| 400 | 1 | Goblin Trio @ Earth Valley |
+| 401 | 1 | Clive @ Theatre Vancoor |
+| 402 | 1 | Fayt Armor |
+| 403 | 5 | Goblin Cemetary Mission (Theatre Vancoor) |
+| 404 | 4 | Algandars Castle (Theatre Vancoor - Human Path) |
+| 405 | 4 | Creatures of the Sewer |
+| 406 | 2 | Chains of Fate (Unused Version) |
+| 407 | 2 | Fireworks |
+| 408 | 4 | Stone of Miracles |
+| 409 | 2 | Please Stop Lord Star |
+| 410 | 3 | The Ultimate Battle |
+| 411 | 2 | The Real Ultimate Battle |
+| 412 | 4 | Gonovitch's Dilemma |
+| 413 | 3 | Earth Dragon Encounter at Dwarf Tunnel (Unused) |
+| 414 | 3 | Hecton Squad's Lunch Plans |
+| 415 | 1 | Encounter with Leona at Vareth |
+| 416 | 28 | Post-Game Dungeon |
+| 417 | 2 | Gawain gives Jack the Arbitrator |
+| 418 | 5 | Elwen gives Jack the Arbitrator (Unused) |
+| 419 | 8 | Leonard's Letter (Knights) |
+| 420 | 5 | Goblin Cemetery Mission (Non-Human Path) |
+| 421 | 5 | The Best Liquor (Liquor Fetch Quest (Non-Human Path)) |
+| 422 | 2 | Letter of Defiance |
+| 423 | 6 | A Masterpiece of Fantasy |
+| 424 | 7 | Algandars Castle (Non-Human) |
+| 425 | 2 | Beasts by the Bridge |
+| 426 | 6 | Practicing Business (Keane and Marsha's Shop Event) |
+| 427 | 7 | Build that Body |
+| 428 | 2 | Top Secret Mission |
+| 429 | 4 | Shining Ore |
+| 430 | 6 | J.J. and Galvados Event |
+| 431 | 4 | Elven Wine for Ganz |
+| 432 | 9 | Chains of Fate |
+| 433 | 2 | The Strongest Elf (Franz & Gil) |
+| 434 | 3 | Journey Pig Introduction |
+| 435 | 3 | Jack vs Hecton Squad (Non-Human) |
+| 436 | 3 | Jack vs Elwen (Non-Human) |
+| 437 | 3 | Jack vs Gerald (Non-Human) |
+
+### 500–516, 554, 561 — 19 files, 191 scripts
+
+| File | Scripts | Name |
+|---:|---:|---|
+| 500 | 18 | Start of game > Departure for first mission |
+| 501 | 24 | First Mission (Outside Lupus Gate) > End of First Mission |
+| 502 | 30 | Second Mission (Knights) |
+| 503 | 2 | Radiata Castle Dungeon Event |
+| 504 | 12 | Lucian's Scheme (Unused) |
+| 505 | 3 | Rose Cochon Discharged |
+| 506 | 19 | Carl's Pub > Jack becoming Corporal |
+| 507 | 8 | Vancoor Square (Sheila Event) |
+| 508 | 9 | Crocogator Mission |
+| 509 | 4 | Smilodon Fang |
+| 510 | 6 | Vexatious Vermin |
+| 511 | 4 | Parsec at Vancoor Square (Unused) |
+| 512 | 6 | Ridley's Birthday, Graveyard of the Elves |
+| 513 | 19 | Second Hecton Squad Mission > Jack becomes a Seargent |
+| 514 | 4 | Knight's discussing Dwarves' demands > Cross' Invasion of Earth Valley |
+| 515 | 7 | Donovitch appears > Earth Dragon |
+| 516 | 6 | Path Split (Ridley visits Jack) |
+| 554 | 2 | Lucian and Jasne get Rose Cochon Discharged |
+| 561 | 8 | Parsec at Vancoor Square |
+
+### 600–606 — 7 files, 72 scripts
+
+| File | Scripts | Name |
+|---:|---:|---|
+| 600 | 13 | Meeting at the Castle |
+| 601 | 15 | Wind Valley (Wind Dragon) > Gawain |
+| 602 | 20 | Parsec > Fire Mountain |
+| 603 | 7 | Lucian's Paintings |
+| 604 | 3 | Ridley visits Jack |
+| 605 | 8 | Ganz's Letter > Castle Jailbreak |
+| 606 | 6 | Gold Dragon at Lupus Gate > Zane |
+
+### 650–660 — 11 files, 75 scripts
+
+| File | Scripts | Name |
+|---:|---:|---|
+| 650 | 13 | Castle Meeting |
+| 651 | 8 | Wind Valley (Wind Dragon) |
+| 652 | 6 | Gawain at Fort Helencia |
+| 653 | 11 | Dynas makes Jack a Knight Captain |
+| 654 | 11 | Fire Dragon at Faucon Gate > Fire Mountain |
+| 655 | 2 | Secrets of the Sewers |
+| 656 | 5 | Ganz's Letter |
+| 657 | 2 | Ridley visits Jack |
+| 658 | 7 | Battle at Lupus Gate |
+| 659 | 2 | VS Gawain |
+| 660 | 8 | Gold Dragon Castle |
+
+### 700–708 — 9 files, 76 scripts
+
+| File | Scripts | Name |
+|---:|---:|---|
+| 700 | 9 | Jack and Ridley leave for City of Flowers |
+| 701 | 6 | Taking over Fort Helencia |
+| 702 | 4 | Parsec |
+| 703 | 12 | Goblin Haven |
+| 704 | 13 | Parsec (Fire Mountain) |
+| 705 | 12 | Lucian's Paintings |
+| 706 | 9 | Cross Attacks Fort Helencia |
+| 707 | 1 | Ridley's Mind |
+| 708 | 10 | Ridley Becomes the Gold Dragon |
+
+### 750–760 — 11 files, 99 scripts
+
+| File | Scripts | Name |
+|---:|---:|---|
+| 750 | 14 | Jack and Ridley go to the City of Flowers |
+| 751 | 12 | Capturing Fort Helencia |
+| 752 | 9 | Meeting with Parsec |
+| 753 | 8 | Goblin Haven |
+| 754 | 6 | Ridley's Illness |
+| 755 | 5 | Parsec (Fire Mountain) |
+| 756 | 10 | Ganz rescues Adele |
+| 757 | 8 | Cross Attacks the Fort |
+| 758 | 8 | Ressan Tree |
+| 759 | 8 | Jack heads to the End of the World |
+| 760 | 11 | Gold Dragon Castle |
+
+### 800–811 — 12 files, 182 scripts
+
+| File | Scripts | Name |
+|---:|---:|---|
+| 800 | 8 | Misc |
+| 801 | 3 | Knights Invade Earth Valley FMV (Game Engine) |
+| 802 | 29 | Debug Room |
+| 803 | 1 | Transpiritation FMV (Game Engine) |
+| 804 | 2 | Earth Dragon FMV (Game Engine) |
+| 805 | 1 | Post-Battle Script |
+| 806 | 1 | Silver Dragon FMV (Game Engine) |
+| 807 | 10 | Movement Restriction Messages |
+| 808 | 1 | Completed Save Data |
+| 809 | 99 | Movement Restriction Messages |
+| 810 | 20 | Movement Restriction Messages |
+| 811 | 7 | Tokyo Game Show 2004/E3 2005 Demo |
+
+File 802 is the debug room and `800/6` its mission-flag tool; the chain
+analysis drops both ([Chains §1](../chains/#1-what-was-read)), which is why the
+[event reference](../reference/) has 829 field scripts rather than 859.
+File 800 is the catch-all: `800/3` and `800/7` are the generic encounter setup
+and result handlers, `800/5` the inn's rest-and-heal, `800/2` Jack's starting
+kit. Files 807, 809 and 810 are the one-line "you cannot go there yet"
+messages that map contact scripts launch — `810/10` from 103 contact scripts
+on 48 maps.
+
+## 6. Loading a file
+
+`CRadiScript::LoadScriptFile(int id)` (`0x002E4660`) does not read anything
+itself <Tag kind="confirmed" />. It stops any slot that is a **pending** mode-1
+start — status byte 0 bit 6 set — since the file it was waiting for is being
+replaced (`0x002E4688`–`0x002E46BC`); then picks record `(id >> 15) & 1` — the
+low or high table — and stores the id into that record's `+0x1C`
+(`0x002E46F0`–`0x002E4740`). The ids `−1` and `−2` select records 0 and 1 the
+same way and are later served from a built-in table at `0x0037E948` rather
+than from the disc. The two records are `0x20`-byte file objects at `this+0x2A00`,
+one per event table, with the current index in the low nibble of `+0x2A40`.
+
+`FuncRun`'s tail then services the request each frame: it resolves the id
+through `GetEventScriptFileDatas` and starts an asynchronous
+`CFileObject::LoadFile`. A mode-1 `SetScriptNumber` issued before the load
+completes is parked in its slot with bit 6 and re-issued by `FuncRun` on the
+frame `CFileObject::GetLoadStatus` reports bit `0x40`
+([How an event starts §3](../starting/#3-event-to-event)).
+
+**"The current event file" is game state.** The engine sets no event file per
+map. `LoadScriptFile` has eleven callers in the whole image and its overlays,
+and on the field they are three: `Command_06` in a script, `CGame::Step1`'s
+post-battle path reading the queued battle event, and `CGame::Step4`'s
+schedule step. Whatever was loaded last is what a bare `start_script(mode=1,
+…)` reaches, which is the convention 800 of the 881 map init scripts rely on
+([How an event starts §4.1](../starting/#41-the-init-script-and-its-two-conventions)).
+
+## 7. What is not established
+
+- Which battle-code call site loads a high-bit file and starts the file-187
+  scripts.
+- What event file 52 is: an unlabelled entity's talk script loads it and
+  starts its script 10, and it is not one of the 107 files in the table above
+  ([Chains §5g](../chains/#5g-every-character-file-walked)).
+- The role of `+0x2A41`, the byte beside the record index, which two engine
+  functions set and clear single bits in.

@@ -1,0 +1,398 @@
+---
+/**
+ * The event reference: every shipped event script, grouped by event file,
+ * rendered from src/data/events.ts.
+ *
+ * Three columns so the table fits the content column: the script with its
+ * verdict, the map it needs, and one stacked cell with what starts it, the
+ * gate on that start, and a fold-out with everything else (chain edges with
+ * their gates, NPC sources, battle context, runtime conditions, reasons).
+ */
+import {
+  EVENTS,
+  EVENT_FILES,
+  EVENT_VERDICT_LABELS,
+  type EventRecord,
+  type EventVerdictClass,
+} from '../data/events';
+import FilterTable from './FilterTable.astro';
+
+const grouped = EVENT_FILES.map((file) => {
+  const entries = EVENTS.filter((e) => e.file === file);
+  const first = entries[0]!;
+  const title = first.inBattle
+    ? `Event file ${file - 0x8000} (high bit) — disk file 187`
+    : `Event file ${file}${first.fileName ? ` — ${first.fileName}` : ''}`;
+  return { file, title, entries };
+});
+
+/**
+ * Which secondary facts a row has, so empty detail blocks are not rendered.
+ * Lists of map or character ids render inline, comma-separated; everything
+ * else one item per line.
+ */
+function details(e: EventRecord) {
+  const rows: { label: string; items: string[]; inline?: boolean }[] = [
+    { label: 'Chains to', items: e.chainsToGuarded },
+    { label: 'Predecessors', items: e.predecessors },
+    { label: 'Contact scripts on maps', items: e.contactMaps.map(String), inline: true },
+    { label: 'Launched from maps', items: e.launchMaps.map(String), inline: true },
+    { label: 'NPC launched by', items: e.npcLaunchedBy },
+    { label: 'NPC gates', items: e.npcGates },
+    { label: 'NPC runtime gates', items: e.npcGatesOther },
+    { label: 'Who sets that list', items: e.npcListGates },
+    { label: 'Post-battle from', items: e.postBattleFrom },
+    { label: 'Pre-battle maps', items: e.preBattleMaps.map(String), inline: true },
+    { label: 'Battle maps', items: e.battleMaps.map(String), inline: true },
+    { label: 'Runtime / computed conditions', items: e.gatesOther },
+    { label: 'Gate notes', items: e.gateNotes },
+    { label: 'Hands off to map', items: e.handsOffToMap.map(String), inline: true },
+    { label: 'Preloads for successor', items: e.preloadsForSuccessor.map(String), inline: true },
+    { label: 'Cast placed by a predecessor', items: e.inheritedChars.map(String), inline: true },
+    { label: 'Only in the debug block', items: e.setupOnlyInDebug },
+    { label: 'Reasons', items: e.reasons },
+  ];
+  return rows.filter((r) => r.items.length > 0);
+}
+
+/**
+ * One map: id with its name underneath. Several: "any of" and the ids
+ * separated by commas, each carrying its name as a tooltip.
+ */
+function mapCell(e: EventRecord) {
+  if (e.maps.length === 0) return null;
+  return {
+    entries: e.maps.map((id, i) => ({ id, name: e.mapNames[i] })),
+    own: e.mapResolution === 'own',
+    several: e.maps.length > 1,
+  };
+}
+
+const verdictOrder: EventVerdictClass[] = [
+  'standalone', 'chained', 'cosmetic', 'map', 'generic', 'battle', 'npc',
+  'mid-chain', 'unresolved', 'in-battle',
+];
+---
+
+<p class="legend">
+  {
+    verdictOrder.map((v) => (
+      <span class:list={['vd', `vd--${v}`]}>{EVENT_VERDICT_LABELS[v]}</span>
+    ))
+  }
+</p>
+
+<FilterTable noun="scripts" placeholder="Filter by event, file name, map, flag, starter or verdict…">
+  <div class="ev-table">
+    <table>
+      <thead>
+        <tr>
+          <th class="ev-table__key">Script</th>
+          <th class="ev-table__map">Map</th>
+          <th>How it starts</th>
+        </tr>
+      </thead>
+      <tbody>
+        {
+          grouped.map(({ title, entries }) => (
+            <>
+              <tr class="ev-table__group">
+                <td colspan="3">{title}</td>
+              </tr>
+              {entries.map((e) => {
+                const map = mapCell(e);
+                const extra = details(e);
+                return (
+                  <tr
+                    class:list={{ dim: e.inBattle }}
+                    id={`ev-${e.file}-${e.script}`}
+                    data-k={[
+                      e.key,
+                      e.label,
+                      e.fileName ?? '',
+                      ...e.maps.map((m) => `map ${m}`),
+                      ...e.mapNames.filter(Boolean),
+                      e.verdict,
+                      EVENT_VERDICT_LABELS[e.verdictClass],
+                      ...e.chainsTo,
+                      ...e.predecessors,
+                      ...e.npcLaunchedBy,
+                      ...e.postBattleFrom,
+                      ...e.gatesOther,
+                      ...e.npcGates,
+                      ...e.contactMaps.map((m) => `map ${m}`),
+                      ...e.launchMaps.map((m) => `map ${m}`),
+                    ].join(' ')}
+                  >
+                    <td class="ev-table__key">
+                      <a href={`#ev-${e.file}-${e.script}`}>
+                        <code>{e.label}</code>
+                      </a>
+                      <span class:list={['vd', `vd--${e.verdictClass}`]} title={e.verdict}>
+                        {EVENT_VERDICT_LABELS[e.verdictClass]}
+                      </span>
+                    </td>
+                    <td class="ev-table__map">
+                      {map ? (
+                        <>
+                          {map.several && <span class="map-any">any of </span>}
+                          {map.entries.map((m, i) => (
+                            <>
+                              {i > 0 && <span class="map-sep">, </span>}
+                              <span
+                                class:list={['map-id', { 'map-id--inherited': !map.own }]}
+                                title={m.name ?? undefined}
+                              >
+                                {m.id}
+                              </span>
+                            </>
+                          ))}
+                          {!map.several && map.entries[0]!.name && (
+                            <span class="map-name">{map.entries[0]!.name}</span>
+                          )}
+                          {!map.own && <span class="map-how">{e.mapResolution}</span>}
+                        </>
+                      ) : (
+                        <span class="none">{e.mapResolution === 'unresolved' ? 'none' : e.mapResolution}</span>
+                      )}
+                    </td>
+                    <td class="ev-table__how">
+                      <div class="fact">
+                        <span class="fact__label">Started by</span>
+                        {e.startedBy.length ? (
+                          <ul class="list">
+                            {e.startedBy.map((s) => (
+                              <li>{s}</li>
+                            ))}
+                          </ul>
+                        ) : (
+                          <span class="none">nothing in the scripts</span>
+                        )}
+                      </div>
+                      <div class="fact">
+                        <span class="fact__label">Gate</span>
+                        {e.gates.length ? (
+                          <ul class="list">
+                            {e.gates.map((g) => (
+                              <li>
+                                <code>{g}</code>
+                              </li>
+                            ))}
+                          </ul>
+                        ) : e.gatesOther.length ? (
+                          <span class="none">runtime only</span>
+                        ) : (
+                          <span class="none">—</span>
+                        )}
+                      </div>
+                      {extra.length > 0 && (
+                        <details class="more">
+                          <summary>more</summary>
+                          <dl>
+                            {extra.map((d) => (
+                              <>
+                                <dt>{d.label}</dt>
+                                <dd>
+                                  {d.inline ? (
+                                    <span class="inline-ids">{d.items.join(', ')}</span>
+                                  ) : (
+                                    <ul class="list">
+                                      {d.items.map((i) => (
+                                        <li>{i}</li>
+                                      ))}
+                                    </ul>
+                                  )}
+                                </dd>
+                              </>
+                            ))}
+                          </dl>
+                        </details>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </>
+          ))
+        }
+      </tbody>
+    </table>
+  </div>
+</FilterTable>
+
+<style is:global>
+  /* This page is a table, not prose: let the content column use the room the
+     right-hand table of contents would have taken. */
+  :root {
+    --sl-content-width: 72rem;
+  }
+</style>
+
+<style>
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+  }
+  .ev-table {
+    overflow-x: auto;
+  }
+  .ev-table table {
+    display: table;
+    width: 100%;
+    margin-block: 0;
+    table-layout: fixed;
+  }
+  .ev-table__key {
+    width: 9.5rem;
+    white-space: nowrap;
+  }
+  .ev-table__map {
+    width: 12rem;
+  }
+  .ev-table__key a {
+    text-decoration: none;
+  }
+  .ev-table__key code {
+    color: var(--rs-peach);
+  }
+  .ev-table__key .vd {
+    display: block;
+    width: fit-content;
+    margin-top: 0.3rem;
+    white-space: normal;
+  }
+  .ev-table__how {
+    overflow-wrap: anywhere;
+  }
+  .ev-table__group td {
+    background: var(--sl-color-gray-6);
+    color: var(--sl-color-text-accent);
+    font-weight: 700;
+    border-bottom: 2px solid var(--sl-color-accent);
+  }
+  .map-id {
+    font-family: var(--sl-font-mono);
+    color: var(--rs-green);
+  }
+  .map-id--inherited {
+    color: var(--rs-peach);
+  }
+  .map-name,
+  .map-how {
+    display: block;
+    font-size: var(--sl-text-xs);
+    color: var(--sl-color-gray-3);
+  }
+  .map-any,
+  .map-sep {
+    font-size: var(--sl-text-xs);
+    color: var(--sl-color-gray-3);
+  }
+  .none {
+    color: var(--sl-color-gray-4);
+    font-size: var(--sl-text-sm);
+  }
+  .fact {
+    display: grid;
+    grid-template-columns: 5.5rem 1fr;
+    gap: 0.5rem;
+    align-items: start;
+    font-size: var(--sl-text-sm);
+  }
+  .fact + .fact {
+    margin-top: 0.25rem;
+  }
+  .fact__label {
+    color: var(--sl-color-gray-3);
+    font-size: var(--sl-text-xs);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    padding-top: 0.15rem;
+  }
+  .list {
+    margin: 0;
+    padding-inline-start: 1rem;
+    font-size: var(--sl-text-sm);
+  }
+  .list li {
+    margin: 0;
+  }
+  .more {
+    margin-top: 0.35rem;
+    font-size: var(--sl-text-xs);
+  }
+  .more summary {
+    cursor: pointer;
+    color: var(--sl-color-gray-3);
+  }
+  .more dl {
+    margin: 0.3rem 0 0;
+  }
+  .more dt {
+    color: var(--sl-color-text-accent);
+    font-weight: 600;
+    margin-top: 0.3rem;
+  }
+  .more dd {
+    margin: 0;
+  }
+  .more .list {
+    font-size: var(--sl-text-xs);
+  }
+  .inline-ids {
+    font-family: var(--sl-font-mono);
+    font-size: var(--sl-text-xs);
+    color: var(--sl-color-gray-2);
+    word-spacing: 0.15em;
+  }
+  .vd {
+    display: inline-block;
+    font-family: var(--sl-font-mono);
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    padding: 0 0.4em;
+    border-radius: 0.2rem;
+    white-space: nowrap;
+    border: 1px solid transparent;
+  }
+  .vd--standalone,
+  .vd--chained {
+    color: var(--rs-green);
+    background: color-mix(in srgb, var(--rs-green) 14%, transparent);
+    border-color: color-mix(in srgb, var(--rs-green) 40%, transparent);
+  }
+  .vd--cosmetic,
+  .vd--generic {
+    color: var(--rs-teal);
+    background: color-mix(in srgb, var(--rs-teal) 14%, transparent);
+    border-color: color-mix(in srgb, var(--rs-teal) 40%, transparent);
+  }
+  .vd--map,
+  .vd--npc,
+  .vd--battle {
+    color: var(--rs-yellow);
+    background: color-mix(in srgb, var(--rs-yellow) 14%, transparent);
+    border-color: color-mix(in srgb, var(--rs-yellow) 40%, transparent);
+  }
+  .vd--mid-chain {
+    color: var(--rs-red);
+    background: color-mix(in srgb, var(--rs-red) 14%, transparent);
+    border-color: color-mix(in srgb, var(--rs-red) 40%, transparent);
+  }
+  .vd--unresolved {
+    color: var(--rs-peach);
+    background: color-mix(in srgb, var(--rs-peach) 14%, transparent);
+    border-color: color-mix(in srgb, var(--rs-peach) 40%, transparent);
+  }
+  .vd--in-battle {
+    color: var(--rs-mauve);
+    background: color-mix(in srgb, var(--rs-mauve) 14%, transparent);
+    border-color: color-mix(in srgb, var(--rs-mauve) 40%, transparent);
+  }
+  :global(tr:target) td {
+    outline: 2px solid var(--sl-color-accent);
+  }
+</style>
