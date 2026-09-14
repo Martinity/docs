@@ -231,7 +231,7 @@ The key index (`i & 0xF`) and the `m(i)` counter (`+3` per byte, running across 
 
 ## Kods
 
-Kods doesn't store file sizes. It stores a table of **boundaries** (offsets), and a segment of payload data is whatever lies *between* two of them. Parsing Kods is less "read a table of files" and more "read a table of cut points, then read off what's between subsequent pairs of them."
+Kods doesn't store file sizes. It stores a table of **boundaries** (offsets). A segment of payload data is whatever lies *between* two of them. Parsing Kods is less "read a table of files" and more "read a table of cut points, then read off what's between subsequent pairs of them."
 
 ### Header Layout
 
@@ -246,7 +246,7 @@ Kods doesn't store file sizes. It stores a table of **boundaries** (offsets), an
 
 **Bytes 4-7**, extracted from the little-endian control word `W`:
 
-``` c
+``` python
 num_entries  = W & 0xFFFF
 shift        = (W >> 16) & 0x0F
 stride       = (W >> 20) & 0x03
@@ -254,7 +254,7 @@ alias_table  = (W >> 29) & 0x01
 datacenter   = (W >> 30) & 0x01
 runtime_lock = (W >> 31) & 0x01
 
-stride_bytes = stride ? 2 : 4    // size (bytes) of one table entry
+stride_bytes = 2 if stride else 4  # size (bytes) of one table entry
 ```
 
 |Bits|Field|Notes|
@@ -273,35 +273,31 @@ stride_bytes = stride ? 2 : 4    // size (bytes) of one table entry
 
 #### Offset Calculation
 
-``` c
-sentinel = stride ? 0xFFFF : 0xFFFFFFFF
+``` python
+sentinel = 0xFFFF if stride else 0xFFFFFFFF
 
 offset(i) =
-    INVALID                              if raw(i) == sentinel
-    payload_offset                       if raw(i) == 0
-    payload_offset + (raw(i) << shift)   otherwise
+    if offset_table(i) == sentinel: INVALID
+    else if offset_table(i) == 0: 0
+    else: offset_table(i) << shift
 ```
 
 #### Table Size
 
-``` c
-table_count    = alias_table ? 2 : 1
-payload_offset = datacenter
-                   ? 0
-                   : header_size + (num_entries * stride_bytes * table_count)   // header_size = 8
+``` python
+table_count    = 2 if alias_table else 1
+payload_offset = 0 if datacenter else header_size + (num_entries * stride_bytes * table_count)   # header_size = 8
 ```
 
-`payload_offset` marks where entry `raw(i) == 0` lands: the very start of the payload, before any shift is applied.
+`payload_offset` marks where entry `offset_table(i) == 0` lands: the very start of the payload, before any shift is applied.
 
 ### Segments
 
-A **segment** is defined by a pair of table entries: a start boundary and the *next entry with a distinct offset*. A slot is invalid only when: `raw(i) == sentinel`. A repeated offset isn't invalid. It just doesn't close a segment on its own, so `next(i)` keeps scanning past repeats until something different shows up (or the table runs out):
+A **segment** is defined by an adjacent pair of table entries: start-end boundaries. A slot is invalid only when: `offset_table(i) | offset_table(i+1) == sentinel`. A repeated offset isn't invalid.
 
-``` c
-//next(i) = smallest k > i such that raw(k) != sentinel and offset(k) != offset(i)
-
-size(i) = offset(next(i)) - offset(i)    // if a next(i) exists
-        = len(payload) - offset(i)       // if no such k exists
+``` python
+size(i) = offset(i+1) - offset(i)
+        = len(payload) - offset(i)   # if no such offset(i+1) exists
 ```
 
 :::caution
@@ -310,26 +306,8 @@ size(i) = offset(next(i)) - offset(i)    // if a next(i) exists
 
 |Type|Condition|Segment size|
 |:--|:--|:--|
-|**Valid**|`raw(i) != sentinel`|`size(i)` as above|
-|**Sentinel**|`raw(i) == sentinel`|`size(i) = INVALID` not a boundary at all|
-
-#### Why a group of slots can share one segment
-
-Because `next(i)` skips forward past repeats, a whole run of slots can point at a *single* underlying segment using only two distinct offset values, a shared start and a shared end, no matter how those two values are distributed across the slots. As long as every occurrence of the smaller one sits at a lower index than every occurrence of the larger one:
-
-```
-fine:       A A A A A A A A A B  // any count of A's, then any count of B's
-also fine:  A B B B B B B B B B  // the split point doesn't matter
-broken:     A A B A A A A A A B  // a B before a later A breaks the assumption
-```
-
-:::note
-Sentinel slots are skipped over by `next(i)`. So `A A S B` is treated as `A B`, where `S` is the sentinel.
-:::
-
-Every slot holding `A` scans past the rest of the `A`s to reach the first `B`, so each one independently computes the same `size = B − A`. A `B` sitting in front of a later `A` breaks the "smaller comes first" assumption `next(i)` relies on and produces a nonsensical result for that `A`.
-
-This is the general mechanism behind the [datacenter headers'](#datacenter-headers) "empty slot" pattern.
+|**Valid**|`offset_table(i) != sentinel`|`size(i)` as above|
+|**Sentinel**|`offset_table(i) == sentinel`|`size(i) = INVALID` not a boundary at all|
 
 ### Lookup
  
@@ -339,7 +317,7 @@ All lookups ultimately walk the offset table by index and compute a segment as a
 
 The caller already has the index, the index is built-in at a higher level:
  
-``` c
+``` python
 offset = offset_table[i]
 ```
  
@@ -347,7 +325,7 @@ offset = offset_table[i]
 
 when `alias_table == 1`, the caller instead has an *Alias* ID, and the index is found by scanning the alias table for a match:
  
-``` c
+``` python
 i      = first index such that (alias_table[i] & sentinel) == (Alias & sentinel)
 offset = offset_table[i]
 ```
@@ -362,8 +340,8 @@ When `alias_table == 1` in the control word, a block of `num_entries * stride_by
 :::caution
 The game doesn't match these Aliases to asset IDs directly:
 
-``` c
-// Example Jack pairing
+``` python
+# Example Jack pairing
 AssetID      = 0x01
 AliasTable   = 0x2711
 ```
@@ -373,9 +351,9 @@ More research is needed to understand the Alias-ID mutation logic.
 
 ### Datacenter Headers
 
-Datacenter headers are **detached** Kods headers. Triggered by `datacenter == 1`. Because there is no header before the payload, `payload_offset = 0`. `TOC[5]` is where the datacenter headers live on disk.
+Datacenter headers are **detached** Kods headers. Triggered by `datacenter == 1`. Because there is no header before the payload, `payload_offset = 0`. `TOC[5]` is where the datacenter headers live on disk. Datacenter headers don't resolve segments from relative offsets, they resolve from RAM offsets (see [Segment Sharing](#segment-sharing)).
 
-Two resolution schemes exist, by category:
+Two header resolution schemes exist, by category:
 
 |Category|Depth|Headers per payload|
 |:--|:--|:--|
@@ -388,16 +366,16 @@ Two resolution schemes exist, by category:
 
 The header is resolved from this formula:
 
-``` c
+``` python
 i          = tocIndex - category.start
-hid_base   = category.hidPrefix + (i * 10)   // this entry's header 0
+hid_base   = category.hidPrefix + (i * 10)   # this entry's header 0
 ```
 
 Here is an example for resolving 'Valkyrie' (TOC[1444]) into its data types, keep in mind that header 0 splits the payload into 9 slots:
 
-``` c
+```
 hid_base = (1444 - 1206) * 10
-TOC[5.2.0.hid_base] + payload: TOC[1444]
+TOC[5.2.0.hid_base] + TOC[1444]
 ├── TOC[5.2.0.hid_base + 1] + slot 0  ->  Model data
 ├── TOC[5.2.0.hid_base + 2] + slot 1  ->  Basic Animation data
 ├── TOC[5.2.0.hid_base + 3] + slot 2  ->  Secondary Basic Animation data
@@ -408,3 +386,17 @@ TOC[5.2.0.hid_base] + payload: TOC[1444]
 ├── TOC[5.2.0.hid_base + 8] + slot 7  ->  Script Data
 └── TOC[5.2.0.hid_base + 9] + slot 8  ->  NPC Battle data
 ```
+
+#### Segment Sharing
+
+Because the offsets are resolved to RAM offsets, multiple slots can share the same segment. Here is a single segment example, where `A < B`:
+
+```
+fine:       A A A A A A A A A B   slots 0-8 share segment A
+also fine:  A B B B B B B B B B   slot 0 doesn't share segment A
+broken:     A A B A A A A A A B
+```
+
+:::note
+Since slots can share the same segment, datacenter headers don't use sentinel slots. If a datacenter headers needs to communicate that the slot is empty it sets the slot to the previous slot's value. 
+:::
