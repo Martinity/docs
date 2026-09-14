@@ -81,9 +81,9 @@ next_header   = header_start + bytes[12:16]   // Only if bytes[12:16] != 0
 |**1**|L|
 |**2**|Z / E, selects for encryption (see [SLE](#sle))|
 |**3**|[Mode](#modes)|
-|**4-8**|Length Decompressed Payload|
-|**9-12**|Length Compressed Payload|
-|**13-16**|Offset to Next Compressed Header (0 = no subsequent header)|
+|**4-7**|Length Compressed Payload|
+|**8-11**|Length Decompressed Payload|
+|**12-15**|Offset to Next Compressed Header (0 = no subsequent header)|
 
 ### Termination
 
@@ -226,7 +226,7 @@ C[i] = ((D[i] XOR K[i & 0xF]) + m(i)) & 0xFF
 ```
 
 :::note
-The key index (`i & 0xF`) and the `m(i)` counter (`+3` per byte, running across the *entire* buffer) cycle independently, realigning only every `16 * 256 / gcd(3, 256) = 4096` bytes.
+The key index (`i & 0xF`) and the `m(i)` counter (`+3` per byte, running across the *entire* buffer) cycle independently, realigning only every `16 * 256 / gcd(16, 256) = 256` bytes.
 :::
 
 ## Kods
@@ -249,7 +249,7 @@ Kods doesn't store file sizes. It stores a table of **boundaries** (offsets), an
 ``` c
 num_entries  = W & 0xFFFF
 shift        = (W >> 16) & 0x0F
-stride       = (W >> 20) & 0x01
+stride       = (W >> 20) & 0x03
 alias_table  = (W >> 29) & 0x01
 datacenter   = (W >> 30) & 0x01
 runtime_lock = (W >> 31) & 0x01
@@ -261,8 +261,8 @@ stride_bytes = stride ? 2 : 4    // size (bytes) of one table entry
 |:--|:--|:--|
 |**0-15**|`num_entries`||
 |**16-19**|`shift`|Range 0-15.|
-|**20**|`stride`|`0` = 4-byte (u32) offset entries, `1` = 2-byte (u16) offset entries|
-|**21-28**|—|Unused|
+|**20-21**|`stride`|`0` = 4-byte (u32) offset entries, `1` = 2-byte (u16) offset entries (No observed values > 2)|
+|**22-28**|—|Unused|
 |**29**|`alias_table`|`1` = a second (ID) table of identical size following the offset table|
 |**30**|`datacenter`|Set only on [datacenter-style headers](#datacenter-headers). Not used at runtime, either deprecated or used only for manual confirmation.|
 |**31**|`runtime_lock`|Set when the container has swapped from relative payload offsets to absolute RAM offsets. Can be safely ignored for static analysis.|
@@ -332,13 +332,28 @@ Every slot holding `A` scans past the rest of the `A`s to reach the first `B`, s
 This is the general mechanism behind the [datacenter headers'](#datacenter-headers) "empty slot" pattern.
 
 ### Lookup
+ 
+All lookups ultimately walk the offset table by index and compute a segment as above. What differs is how that index is obtained.
+ 
+#### **Direct index** 
 
-All lookups ultimately walk the offset table by index and compute a segment as above. What differs is how that index is obtained:
+The caller already has the index, the index is built-in at a higher level:
+ 
+``` c
+offset = offset_table[i]
+```
+ 
+#### **Alias-based**
 
-- **Direct index:** when there's no alias table (`alias_table == 0`), the caller already has the index and looks it up directly.
-- **Alias-based:** when `alias_table == 1`, the caller instead has an alias, and the alias table is walked with each entry masked against the alias to find a match. On match, `alias_table[i] == offset_table[i]`.
-
+when `alias_table == 1`, the caller instead has an *Alias* ID, and the index is found by scanning the alias table for a match:
+ 
+``` c
+i      = first index such that (alias_table[i] & sentinel) == (Alias & sentinel)
+offset = offset_table[i]
+```
+ 
 Either way, once an index is in hand, segment size is computed identically. The alias table only changes *how you find the index*, not what you do with it.
+
 
 ### Alias Table
 
