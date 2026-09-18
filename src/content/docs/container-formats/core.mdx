@@ -9,6 +9,7 @@ sidebar:
 
 import { CardGrid, LinkCard, LinkButton } from '@astrojs/starlight/components';
 import DatacenterMap from '/src/components/DatacenterMap.astro';
+import SourceBox from '/src/components/Source.astro';
 
 This documentation covers the container formats used by the Radiata Stories Filesystem (FS). The goal is to provide enough information for developers to recreate the parsing used by the RadiataModdingTool.
 
@@ -43,8 +44,8 @@ The ISO 9660 records start in sector 16: `(16 * 0x800) + 0x9C`. This section of 
 |**26**|File Unit Size|
 |**27**|Interleave Gap size|
 |**28-31**|Volume Sequence Number (both-endian)|
-|**32**|Length of the Record Identifier|
-|**33+**|Record Identifier|
+|**32**|Length of the File Identifier|
+|**33+**|File Identifier|
 
 :::note
 "Both-endian" fields store the same value twice, once in each byte order. Either half alone is sufficient to read the field, and they should always agree:
@@ -59,6 +60,8 @@ Volume sequence  = u16_LE(bytes[28:30]) ==  u16_BE(bytes[30:32])
 :::caution
 To round-trip, recalculate sizes and copy the rest verbatim.
 :::
+
+<SourceBox href='https://www.ecma-international.org/wp-content/uploads/ECMA-119_2nd_edition_december_1987.pdf' label='ECMA-119 (1987), Volume and File Structure of CDROM for Information Interchange' />
 
 ## Compression
 
@@ -228,6 +231,13 @@ C[i] = ((D[i] XOR K[i & 0xF]) + m(i)) & 0xFF
 :::note
 The key index (`i & 0xF`) and the `m(i)` counter (`+3` per byte, running across the *entire* buffer) cycle independently, realigning only every `16 * 256 / gcd(16, 256) = 256` bytes.
 :::
+
+<SourceBox>
+  <code>CBios</code>,
+  <code>CDecompress</code>,
+  <code>CSplitDecompress</code>,
+  <code>DecodeKeyMain</code>
+</SourceBox>
 
 ## Kods
 
@@ -400,3 +410,12 @@ broken:     A A B A A A A A A B
 :::note
 Since slots can share the same segment, datacenter headers don't use sentinel slots. If a datacenter headers needs to communicate that the slot is empty it sets the slot to the previous slot's value. 
 :::
+
+<SourceBox>
+  <code>Rel2AbsKodsAddr</code>,
+  <code>GetKodsDataOffset</code>,
+  <code>GetKodsIndexFromAlias</code>,
+  <code>GetKodsDataAlias</code>,
+  <code>GetKodsAddress</code>,
+  <code>CRadiDatacenter</code> 
+</SourceBox>

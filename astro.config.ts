@@ -59,7 +59,7 @@ export default defineConfig({
           ],
         },
         {
-          label: 'Container formats',
+          label: 'Pure Containers',
           items: [
             { label: 'Core: ISO, SLZ, Kods', slug: 'container-formats/core' },
           ],
