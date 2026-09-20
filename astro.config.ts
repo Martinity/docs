@@ -59,6 +59,12 @@ export default defineConfig({
           ],
         },
         {
+          label: 'Pure Containers',
+          items: [
+            { label: 'Core: ISO, SLZ, Kods', slug: 'container-formats/core' },
+          ],
+        },
+        {
           label: 'RMF — message format',
           items: [
             { label: '1–3 · Container', slug: 'rmf/container' },

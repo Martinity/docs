@@ -1,0 +1,107 @@
+---
+/**
+ * Datacenter header index — how on-disc TOC indices resolve to Datacenter
+ * (table 5) header IDs. Two shapes: a direct one-index-to-one-header map
+ * (single-depth payloads, e.g. Asset Banks) and a shared block of ten
+ * headers per category range (nested payloads, e.g. Entity Packs).
+ *
+ * Source: the modding tool's _TARGET_STATIC / _TARGET_MAP tables.
+ */
+import { DATACENTER_STATIC, DATACENTER_RANGES } from '../data/datacenter-map';
+import FilterTable from './FilterTable.astro';
+
+const hidStr = (hid: readonly number[]) => hid.join('.');
+
+const staticRows = [...DATACENTER_STATIC].sort((a, b) => a.tocIndex - b.tocIndex);
+
+const rangeRows = DATACENTER_RANGES.map((r) => {
+  const lastHidParts = [...r.hidPrefix];
+  lastHidParts[lastHidParts.length - 1] = r.hidPrefix[2] + 10 - 1;
+  return {
+    ...r,
+    firstHid: hidStr(r.hidPrefix),
+    lastHid: hidStr(lastHidParts),
+  };
+});
+---
+
+<h4>Asset Banks</h4>
+<p>One payload to one header found at hierarchical ID:</p>
+
+<FilterTable noun="indices" placeholder="Filter by TOC index or header ID…">
+  <div class="dc-table">
+    <table>
+      <thead>
+        <tr>
+          <th class="dc-table__idx">TOC Index</th>
+          <th>Header ID</th>
+          <th>Category</th>
+        </tr>
+      </thead>
+      <tbody>
+        {
+          staticRows.map((r) => (
+            <tr data-k={[r.tocIndex, hidStr(r.hid)].join(' ')}>
+              <td class="dc-table__idx">{r.tocIndex}</td>
+              <td>
+                <code>{hidStr(r.hid)}</code>
+              </td>
+              <td>{r.category}</td>
+            </tr>
+          ))
+        }
+      </tbody>
+    </table>
+  </div>
+</FilterTable>
+
+<h4>Entity Packs</h4>
+<p>One payload to 10 headers found in:</p>
+
+<FilterTable noun="ranges" placeholder="Filter by TOC index or header ID…">
+  <div class="dc-table">
+    <table>
+      <thead>
+        <tr>
+          <th class="dc-table__idx">TOC Range</th>
+          <th>Header IDs</th>
+          <th class="dc-table__category">Category</th>
+        </tr>
+      </thead>
+      <tbody>
+        {
+          rangeRows.map((r) => (
+            <tr data-k={[r.start, r.end, r.firstHid, r.lastHid].join(' ')}>
+              <td class="dc-table__idx">
+                {r.start}&ndash;{r.end}
+              </td>
+              <td>
+                <code>{r.firstHid}</code>
+              </td>
+              <td class="dc-table__category">{r.category}</td>
+            </tr>
+          ))
+        }
+      </tbody>
+    </table>
+  </div>
+</FilterTable>
+
+<style>
+  .dc-table {
+    overflow-x: auto;
+    margin-block: 1rem 1.5rem;
+  }
+  .dc-table table {
+    margin-block: 0;
+  }
+  .dc-table__idx,
+  .dc-table__count {
+    white-space: nowrap;
+  }
+  .dc-table code {
+    font-family: var(--sl-font-mono);
+    font-size: var(--sl-text-code-sm);
+    color: var(--rs-peach);
+  }
+</style>
