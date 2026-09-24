@@ -84,15 +84,15 @@ builds) executes **twice**, across two separate EE resets:
 Simplified hard-reset boot
   -> IOP Kernel 0.9.1 (BIOS default) loads
   -> main ELF loads and executes (1st time)
-       -> triggers sceSifRebootIop (loads the custom kernel image)
+       -> triggers kernel reload
        -> triggers an EE-side reboot request
   -> "Update rebooting.." / EE/iR5900 Recompiler Reset
   -> main ELF loads and executes AGAIN (2nd time, same entry point)
        -> now running under the custom IOP Kernel 2.2
-       -> proceeds into CBios / MakeFileSystem / sound / TOC read
+       -> proceeds into system initialisation
 ```
 
-The single `main` symbol seen in static disassembly corresponds to two logical
+`main()` refers to two logical
 phases sharing one entry point — an early phase whose job is to kick off the IOP
 kernel reboot, and a later phase (after that reboot completes) that performs the
 actual game bring-up starting with the filesystem.

@@ -79,7 +79,7 @@ filesystem_bring_up()
 ```
 
 RNG seeding: a live EE Timer0 COUNT register read, multiplied by a fixed
-constant, `0xCAD` added, and the result seeds `InitRandom()`.
+constant, `0xCAD` added, and the result seeds the random number generator.
 <Tag kind="confirmed" />, fully reproducible.
 
 ### 4.5 Conditional gate: the shared flag byte
@@ -132,12 +132,9 @@ initialisation for sounds, music, and voices
 one initialisation gated behind a second flag
 ```
 
-### 4.9 Secret key and checksum pass
+### 4.9 EE->Sif entropy
 
-`CSound::GetSecretKeyCode` fills a buffer, which is processed by a **VU0
-microprogram**, combined with `CStorage::ReadClock`, summed into a byte, and used
-as a loop bound to burn additional `Random()` calls. <Tag kind="inferred" />:
-entropy mixing, not a hard integrity gate.
+EE→Sif obtains entropy-related data through a SIF request and passes the returned buffer into the immediately following entropy-mixing sequence, where it is combined with a clock-derived value and processed by VU0 before being reduced to a byte. That byte controls additional Random() calls. <Tag kind="inferred" />: interpreted as entropy mixing rather than a hard integrity gate.
 
 ### 4.10 Overlay segment loader: hand-off to segment 1 (Step0 00)
 
